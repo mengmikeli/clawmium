@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In — CityServe</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="login">
+
+  <header class="site-header">
+    <div class="logo">CityServe <span>Bay Area Municipal Services</span></div>
+    <nav>
+      <a href="/">Services</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="login-wrapper">
+      <h2>Sign in to CityServe</h2>
+      <div id="login-error" class="login-error"></div>
+      <form id="login-form">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" autocomplete="username" required>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Sign In</button>
+      </form>
+      <div class="login-hint">
+        Demo credentials: <code>mike.chen</code> / <code>cityserve2025</code>
+      </div>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

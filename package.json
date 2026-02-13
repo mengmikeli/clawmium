@@ -1,0 +1,32 @@
+{
+  "name": "clawmium",
+  "version": "0.1.0",
+  "description": "Agent-first, human-second browser",
+  "main": "index.js",
+  "scripts": {
+    "cityserve": "tsx cityserve/server.ts",
+    "cityserve:watch": "tsx watch cityserve/server.ts",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:browser": "tsx src/browser/__test__.ts",
+    "test:llm": "tsx src/llm/__test__.ts",
+    "clm": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "playwright": "^1.50.1",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "openai": "^4.82.0"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
