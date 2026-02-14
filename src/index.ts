@@ -50,10 +50,9 @@ async function main() {
     const repl = new Repl(engine, provider, `browsing ${site}`, site);
     await repl.start(url);
   } else {
-    // clm — start with default landing page (HN)
-    const defaultUrl = "https://news.ycombinator.com";
-    const repl = new Repl(engine, provider, "browsing hacker news", "hackernews");
-    await repl.start(defaultUrl);
+    // clm — start with blank prompt, user navigates via /goto or /home
+    const repl = new Repl(engine, provider, "", "");
+    await repl.start();
   }
 }
 

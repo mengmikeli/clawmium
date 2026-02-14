@@ -87,7 +87,12 @@ export function help(): void {
   console.log(`  ${CYAN}/hide${RESET}          Close browser window`);
   console.log(`  ${CYAN}/goto <url>${RESET}    Navigate to a URL`);
   console.log(`  ${CYAN}/back${RESET}          Navigate back`);
+  console.log(`  ${CYAN}/forward${RESET}       Navigate forward`);
+  console.log(`  ${CYAN}/home${RESET}          Go to home URL (set with /home <url>)`);
+  console.log(`  ${CYAN}/refresh${RESET}       Re-analyze current page`);
+  console.log(`  ${CYAN}/login${RESET}         Log in to current site`);
   console.log(`  ${CYAN}/save${RESET}          Save data to disk`);
+  console.log(`  ${CYAN}/url${RESET}           Show current URL and stack`);
   console.log(`  ${CYAN}/demo${RESET}          Run CityServe demo`);
   console.log(`  ${CYAN}/quit${RESET}          End session`);
   console.log(`  ${CYAN}/help${RESET}          Show this help`);

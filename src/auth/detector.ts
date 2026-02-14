@@ -64,6 +64,24 @@ export async function detectLoginPage(page: Page): Promise<LoginDetectionResult>
     score += 5;
   }
 
+  // Signal 6: Search input (negative, weight -30)
+  const hasSearchInput = await page.evaluate(() => {
+    return document.querySelector(
+      'input[type="search"], input[placeholder*="search" i], input[name*="search" i], input[aria-label*="search" i]'
+    ) !== null;
+  });
+  if (hasSearchInput) {
+    signals["search_input"] = -30;
+    score -= 30;
+  }
+
+  // Signal 7: Content-heavy page (negative, weight -15)
+  const linkCount = await page.evaluate(() => document.querySelectorAll("a[href]").length);
+  if (linkCount > 20) {
+    signals["many_links"] = -15;
+    score -= 15;
+  }
+
   const confidence = score / 100;
 
   return {

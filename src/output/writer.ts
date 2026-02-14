@@ -3,11 +3,30 @@ import * as path from "path";
 import { ExtractedData } from "../llm/provider";
 
 const CLM_DIR = path.join(process.env.HOME || "~", "clm");
+const CONFIG_PATH = path.join(CLM_DIR, "config.json");
+
+interface ClmConfig {
+  homeUrl?: string;
+}
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+}
+
+export function loadConfig(): ClmConfig {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+    }
+  } catch { /* corrupt config — start fresh */ }
+  return {};
+}
+
+export function saveConfig(config: ClmConfig): void {
+  ensureDir(CLM_DIR);
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
 function datestamp(): string {

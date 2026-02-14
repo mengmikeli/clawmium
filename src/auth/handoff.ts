@@ -19,37 +19,42 @@ interface FormField {
 async function detectFormFields(page: Page): Promise<FormField[]> {
   return page.evaluate(() => {
     const fields: Array<{ selector: string; type: string; name: string; label: string }> = [];
-    const inputs = document.querySelectorAll('form input:not([type="hidden"]):not([type="submit"])');
+    // Only look at forms that contain a password field to avoid picking up search inputs etc.
+    const forms = document.querySelectorAll("form");
+    for (const form of forms) {
+      if (!form.querySelector('input[type="password"]')) continue;
+      const inputs = form.querySelectorAll('input:not([type="hidden"]):not([type="submit"])');
 
-    for (const el of inputs) {
-      const input = el as HTMLInputElement;
-      const name = input.name || input.id || "";
-      const type = input.type || "text";
-      const id = input.id;
+      for (const el of inputs) {
+        const input = el as HTMLInputElement;
+        const name = input.name || input.id || "";
+        const type = input.type || "text";
+        const id = input.id;
 
-      let selector = "";
-      if (id) {
-        selector = `#${id}`;
-      } else if (name) {
-        selector = `input[name="${name}"]`;
-      } else {
-        selector = `input[type="${type}"]`;
-      }
+        let selector = "";
+        if (id) {
+          selector = `#${id}`;
+        } else if (name) {
+          selector = `input[name="${name}"]`;
+        } else {
+          selector = `input[type="${type}"]`;
+        }
 
-      let label = "";
-      if (id) {
-        const labelEl = document.querySelector(`label[for="${id}"]`);
-        if (labelEl) label = labelEl.textContent?.trim() || "";
-      }
-      if (!label) {
-        const parent = input.closest("label");
-        if (parent) label = parent.textContent?.trim() || "";
-      }
-      if (!label) {
-        label = input.placeholder || name || type;
-      }
+        let label = "";
+        if (id) {
+          const labelEl = document.querySelector(`label[for="${id}"]`);
+          if (labelEl) label = labelEl.textContent?.trim() || "";
+        }
+        if (!label) {
+          const parent = input.closest("label");
+          if (parent) label = parent.textContent?.trim() || "";
+        }
+        if (!label) {
+          label = input.placeholder || name || type;
+        }
 
-      fields.push({ selector, type, name, label });
+        fields.push({ selector, type, name, label });
+      }
     }
 
     return fields;

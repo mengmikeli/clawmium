@@ -6,7 +6,7 @@ import { detectLoginPage } from "../auth/detector";
 import { performCLIAuth } from "../auth/handoff";
 import { LLMProvider, PageInterpretation, ConversationContext, ExtractedData } from "../llm/provider";
 import * as render from "./renderer";
-import { saveData, saveSessionLog } from "../output/writer";
+import { saveData, saveSessionLog, loadConfig, saveConfig } from "../output/writer";
 
 const LLM_TIMEOUT = 30_000; // 30s timeout for LLM calls
 
@@ -31,6 +31,10 @@ interface SessionState {
   log: Array<{ role: string; content: string; timestamp: number }>;
   site: string;
   pageStack: PageSnapshot[];
+  forwardStack: PageSnapshot[];
+  loginAvailable: boolean;
+  homeUrl: string;
+  currentUrl: string;  // REPL stack's current page URL — source of truth
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string, signal?: AbortSignal): Promise<T> {
@@ -71,6 +75,7 @@ export class Repl {
     this.engine = engine;
     this.llm = llm;
     this.interceptor = new NetworkInterceptor();
+    const config = loadConfig();
     this.state = {
       userGoal,
       currentInterpretation: null,
@@ -81,29 +86,51 @@ export class Repl {
       log: [{ role: "user", content: userGoal, timestamp: Date.now() }],
       site,
       pageStack: [],
+      forwardStack: [],
+      loginAvailable: false,
+      homeUrl: config.homeUrl || "",
+      currentUrl: "",
     };
   }
 
-  async start(baseUrl: string): Promise<void> {
+  async start(baseUrl?: string): Promise<void> {
+    // If no explicit URL given, use persisted home URL
+    const startUrl = baseUrl || this.state.homeUrl || "";
+
     render.status("launching headless browser...");
-    await this.engine.launch(baseUrl);
+    await this.engine.launch(startUrl || "about:blank");
 
     const page = this.engine.getPage();
     this.nav = new PageNavigator(page);
 
-    this.interceptor.attach(page, baseUrl);
-    this.interceptor.onIntercept = (resp) => {
-      if (!this.muteInterceptor) {
-        render.intercepted(resp.method, resp.url, resp.status, resp.size);
+    if (startUrl) {
+      // Set up site/goal if starting from persisted home URL (no baseUrl arg)
+      if (!baseUrl && this.state.homeUrl) {
+        try {
+          const hostname = new URL(startUrl).hostname;
+          this.state.site = hostname.replace(/^www\./, "").split(".")[0];
+          this.state.userGoal = `browsing ${hostname}`;
+          this.engine.setBaseUrl(new URL(startUrl).origin);
+        } catch { /* invalid home URL — will fail on navigation */ }
       }
-    };
 
-    // Navigate to initial page
-    render.status(`navigating to ${baseUrl}`);
-    await this.nav.goto(baseUrl);
+      this.interceptor.attach(page, startUrl);
+      this.interceptor.onIntercept = (resp) => {
+        if (!this.muteInterceptor) {
+          render.intercepted(resp.method, resp.url, resp.status, resp.size);
+        }
+      };
 
-    // Process the first page
-    await this.processCurrentPage();
+      // Navigate to initial page
+      render.status(`navigating to ${startUrl}...`);
+      await this.nav.goto(startUrl);
+      this.state.currentUrl = startUrl;
+
+      // Process the first page
+      await this.processCurrentPage();
+    } else {
+      render.hint(["type /goto <url> to navigate, /home to set a home page, /help for commands"]);
+    }
 
     // Start the input loop
     this.startReadline();
@@ -154,6 +181,15 @@ export class Repl {
       } catch (err) {
         if (err instanceof CancelledError) {
           // Already handled by SIGINT handler
+        } else if (/closed|destroyed|disposed|target/i.test((err as Error).message)) {
+          // Page/browser died mid-operation — force recover and retry once
+          try {
+            await this.syncBrowser();
+            await this.handleInput(input);
+          } catch (retryErr) {
+            render.error((retryErr as Error).message);
+            this.rl.prompt();
+          }
         } else {
           render.error((err as Error).message);
           this.rl.prompt();
@@ -174,58 +210,119 @@ export class Repl {
   }
 
   /**
-   * Ensure browser is alive before running a browser operation.
-   * If crashed, recover and reattach.
+   * Sync browser to match REPL's current position (currentUrl).
+   * Called before any operation that needs the browser.
+   * Handles: dead browser, dead page (WSL2), wrong URL (after /back /forward).
    */
-  private async ensureBrowser(): Promise<void> {
+  private async syncBrowser(): Promise<void> {
+    // 1. Is browser alive?
     if (!this.engine.isAlive()) {
-      render.warn("browser crashed — recovering...");
-      await this.engine.recover();
-      this.reattach();
-      render.success("browser recovered");
+      await this.recoverBrowser();
+      return;
+    }
+
+    // 2. Is page responsive? (WSL2: browser connected but page dead)
+    let browserUrl: string;
+    try {
+      browserUrl = await this.engine.getPage().evaluate(() => window.location.href);
+    } catch {
+      await this.recoverBrowser();
+      return;
+    }
+
+    // 3. Is browser on the right URL?
+    if (this.state.currentUrl && browserUrl !== this.state.currentUrl) {
+      this.interceptor.clear();
+      await this.nav.goto(this.state.currentUrl);
+    }
+  }
+
+  /**
+   * Relaunch headless browser and navigate to REPL's current position.
+   */
+  private async recoverBrowser(): Promise<void> {
+    render.warn("browser disconnected — recovering...");
+    await this.engine.recover();
+    this.reattach();
+    if (this.state.currentUrl && this.state.currentUrl !== "about:blank") {
+      try {
+        await this.nav.goto(this.state.currentUrl);
+      } catch { /* recovery navigation failed — continue on about:blank */ }
+    }
+    render.success("browser recovered");
+  }
+
+  private async runLoginFlow(): Promise<void> {
+    await this.syncBrowser();
+    const page = this.engine.getPage();
+
+    // Check for a password form before tearing down readline
+    const hasPasswordForm = await page.evaluate(() => {
+      const forms = document.querySelectorAll("form");
+      for (const form of forms) {
+        if (form.querySelector('input[type="password"]')) return true;
+      }
+      return false;
+    });
+    if (!hasPasswordForm) {
+      render.warn("no login form found on this page");
+      this.rl.prompt();
+      return;
+    }
+
+    render.status("starting login flow...");
+
+    // Pause readline and mute interceptor during auth
+    this.muteInterceptor = true;
+    this.closingForAuth = true;
+    if (this.rl) {
+      this.rl.close();
+    }
+    this.closingForAuth = false;
+
+    const authResult = await performCLIAuth(page);
+    this.muteInterceptor = false;
+
+    if (authResult.success) {
+      render.success("login successful — session captured");
+      this.logAgent(`Login successful — redirected to ${authResult.redirectedTo}`);
+      this.state.loginAvailable = false;
+      this.state.currentUrl = authResult.redirectedTo;
+      this.startReadline();
+      await this.processCurrentPage();
+      this.rl.prompt();
+    } else {
+      render.error("login failed or cancelled");
+      this.logAgent("Login failed");
+      this.startReadline();
+      this.rl.prompt();
     }
   }
 
   private async processCurrentPage(): Promise<void> {
-    await this.ensureBrowser();
+    await this.syncBrowser();
+    try {
+      await this._processCurrentPage();
+    } catch (err) {
+      if (/closed|destroyed|disposed|target/i.test((err as Error).message)) {
+        await this.recoverBrowser();
+        await this._processCurrentPage();
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  private async _processCurrentPage(): Promise<void> {
     const page = this.engine.getPage();
 
-    // Check for login page
+    // Check for login page — present as optional choice, not automatic
+    this.state.loginAvailable = false;
     const loginCheck = await detectLoginPage(page);
     if (loginCheck.isLoginPage) {
-      render.status("login required — detected login form");
-      render.warn("LOGIN REQUIRED");
-      render.status(`Site: ${this.state.site} (${this.nav.currentUrl()})`);
-      render.status("Enter credentials below:");
-
-      this.logAgent("Login page detected — prompting for credentials in CLI");
-
-      // Pause readline and mute interceptor during auth
-      this.muteInterceptor = true;
-      this.closingForAuth = true;
-      if (this.rl) {
-        this.rl.close();
-      }
-      this.closingForAuth = false;
-
-      const authResult = await performCLIAuth(page);
-
-      // Unmute interceptor
-      this.muteInterceptor = false;
-
-      if (authResult.success) {
-        render.success("login successful — session captured");
-        this.logAgent(`Login successful — redirected to ${authResult.redirectedTo}`);
-
-        // Process the post-login page
-        await this.processCurrentPage();
-        return;
-      } else {
-        render.error("login failed");
-        this.logAgent("Login failed");
-        this.startReadline();
-        return;
-      }
+      this.state.loginAvailable = true;
+      render.warn(`login form detected (confidence: ${Math.round(loginCheck.confidence * 100)}%)`);
+      this.logAgent("Login page detected — available as optional choice");
     }
 
     // Extract page content
@@ -290,6 +387,15 @@ export class Repl {
         this.logAgent(interpretation.summary);
       }
 
+      // Append login choice if login form was detected
+      if (this.state.loginAvailable) {
+        interpretation.choices.push({
+          index: interpretation.choices.length + 1,
+          label: "Log in to this site",
+          action: "click",
+        });
+      }
+
       // Show navigation choices if any
       if (interpretation.choices.length > 0) {
         render.choices(interpretation.choices.map((c) => ({ index: c.index, label: c.label })));
@@ -308,18 +414,32 @@ export class Repl {
       const arg = parts.slice(1).join(" ");
       switch (cmd) {
         case "show":
-          await this.ensureBrowser();
-          render.status("opening browser window...");
-          await this.engine.show();
-          this.reattach();
+          await this.syncBrowser();
+          if (this.engine.isShowing()) {
+            render.status("bringing browser window to focus...");
+          } else {
+            render.status("opening browser window...");
+          }
+          {
+            const created = await this.engine.show();
+            if (created) {
+              this.reattach();
+              // Wait for the headed page to be ready
+              try {
+                await this.engine.getPage().waitForLoadState("domcontentloaded", { timeout: 5_000 });
+              } catch { /* page may already be loaded */ }
+            }
+          }
+          this.logCommand("/show");
           this.rl.prompt();
           return;
 
         case "hide":
-          await this.ensureBrowser();
+          await this.syncBrowser();
           render.status("hiding browser window...");
           await this.engine.hide();
           this.reattach();
+          this.logCommand("/hide");
           this.rl.prompt();
           return;
 
@@ -342,43 +462,165 @@ export class Repl {
             // Relative path on current site
             url = `${this.engine.getBaseUrl()}${url.startsWith("/") ? "" : "/"}${url}`;
           }
-          // Reset goal when navigating to an external site
+          // Reset goal and base URL when navigating to an external site
           if (isExternal) {
             this.state.userGoal = `browsing ${new URL(url).hostname}`;
+            const origin = new URL(url).origin;
+            this.engine.setBaseUrl(origin);
+            this.state.site = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
           }
           render.status(`navigating to ${url}...`);
-          await this.ensureBrowser();
+          await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
           await this.nav.goto(url);
+          this.state.currentUrl = url;
           await this.engine.getPage().waitForTimeout(500);
           await this.processCurrentPage();
+          this.logCommand(`/goto ${arg}`);
           this.rl.prompt();
           return;
         }
 
-        case "back":
-          await this.ensureBrowser();
-          render.status("navigating back...");
-          await this.nav.goBack();
-          if (!this.popPageState()) {
-            // No cached state — re-interpret from scratch
-            await this.processCurrentPage();
+        case "back": {
+          const backTarget = this.state.pageStack[this.state.pageStack.length - 1];
+          if (backTarget) {
+            // Pure stack mutation — no browser interaction
+            const current = this.captureSnapshot();
+            this.state.pageStack.pop();
+            if (current) this.state.forwardStack.push(current);
+            this.restoreSnapshot(backTarget);
+            render.hint(["/refresh to update content"]);
+          } else {
+            render.warn("no history to go back to");
           }
+          this.logCommand("/back");
+          this.rl.prompt();
+          return;
+        }
+
+        case "forward": {
+          const fwdTarget = this.state.forwardStack[this.state.forwardStack.length - 1];
+          if (fwdTarget) {
+            // Pure stack mutation — no browser interaction
+            const current = this.captureSnapshot();
+            this.state.forwardStack.pop();
+            if (current) this.state.pageStack.push(current);
+            this.restoreSnapshot(fwdTarget);
+            render.hint(["/refresh to update content"]);
+          } else {
+            render.warn("no forward history");
+          }
+          this.logCommand("/forward");
+          this.rl.prompt();
+          return;
+        }
+
+        case "refresh":
+          await this.syncBrowser();
+          render.status("refreshing page...");
+          this.interceptor.clear();
+          await this.processCurrentPage();
+          this.logCommand("/refresh");
           this.rl.prompt();
           return;
 
         case "save":
           this.forceSave();
+          this.logCommand("/save");
           this.rl.prompt();
           return;
+
+        case "login":
+          await this.runLoginFlow();
+          this.logCommand("/login");
+          return;
+
+        case "home": {
+          if (arg === "clear") {
+            this.state.homeUrl = "";
+            saveConfig({ homeUrl: "" });
+            render.success("home URL cleared");
+            this.logCommand("/home clear");
+            this.rl.prompt();
+            return;
+          }
+          if (arg) {
+            // /home set <url> or /home <url>
+            let url = arg.replace(/^set\s+/, "");
+            if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(url)) {
+              url = `https://${url}`;
+            }
+            this.state.homeUrl = url;
+            saveConfig({ homeUrl: url });
+            render.success(`home URL set to ${url}`);
+            this.logCommand(`/home ${arg}`);
+            this.rl.prompt();
+            return;
+          }
+          if (this.state.homeUrl) {
+            // Navigate to home
+            render.status(`navigating to ${this.state.homeUrl}...`);
+            await this.syncBrowser();
+            this.pushPageState();
+            this.interceptor.clear();
+            this.state.userGoal = `browsing ${new URL(this.state.homeUrl).hostname}`;
+            await this.nav.goto(this.state.homeUrl);
+            this.state.currentUrl = this.state.homeUrl;
+            await this.engine.getPage().waitForTimeout(500);
+            await this.processCurrentPage();
+            this.logCommand("/home");
+            this.rl.prompt();
+            return;
+          }
+          // No home URL set — prompt user
+          const answer = await new Promise<string>((resolve) => {
+            this.rl.question("  enter home URL (or 'cancel'): ", resolve);
+          });
+          const trimmed = answer.trim();
+          if (!trimmed || trimmed.toLowerCase() === "cancel") {
+            this.rl.prompt();
+            return;
+          }
+          let homeUrl = trimmed;
+          if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(homeUrl)) {
+            homeUrl = `https://${homeUrl}`;
+          }
+          this.state.homeUrl = homeUrl;
+          saveConfig({ homeUrl });          render.success(`home URL set to ${homeUrl}`);
+          render.status(`navigating to ${homeUrl}...`);
+          await this.syncBrowser();
+          this.pushPageState();
+          this.interceptor.clear();
+          this.state.userGoal = `browsing ${new URL(homeUrl).hostname}`;
+          await this.nav.goto(homeUrl);
+          this.state.currentUrl = homeUrl;
+          await this.engine.getPage().waitForTimeout(500);
+          await this.processCurrentPage();
+          this.logCommand("/home");
+          this.rl.prompt();
+          return;
+        }
 
         case "quit":
           await this.shutdown();
           return;
 
+        case "url": {
+          let browserUrl = "(unknown)";
+          try { browserUrl = this.engine.getPage().url(); } catch { /* dead page */ }
+          const synced = browserUrl === this.state.currentUrl;
+          console.log(`  current:  ${this.state.currentUrl || "(none)"}`);
+          console.log(`  browser:  ${browserUrl}${synced ? "" : " (not synced)"}`);
+          console.log(`  back:     [${this.state.pageStack.map(s => s.url).join(", ")}]`);
+          console.log(`  forward:  [${this.state.forwardStack.map(s => s.url).join(", ")}]`);
+          this.rl.prompt();
+          return;
+        }
+
         case "help":
           render.help();
+          this.logCommand("/help");
           this.rl.prompt();
           return;
 
@@ -386,12 +628,14 @@ export class Repl {
           const demoUrl = process.env.BASE_URL || "http://localhost:3000";
           this.state.userGoal = "check my water bill";
           render.status(`starting CityServe demo at ${demoUrl}...`);
-          await this.ensureBrowser();
+          await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
           await this.nav.goto(demoUrl);
+          this.state.currentUrl = demoUrl;
           await this.engine.getPage().waitForTimeout(500);
           await this.processCurrentPage();
+          this.logCommand("/demo");
           this.rl.prompt();
           return;
         }
@@ -402,6 +646,18 @@ export class Repl {
           this.rl.prompt();
           return;
       }
+    }
+
+    // Command-like input detection — prompt if user typed a bare command name
+    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url"];
+    const lowerInput = input.toLowerCase();
+    if (knownCommands.includes(lowerInput) || knownCommands.some(c => lowerInput.startsWith(c + " "))) {
+      const confirmed = await this.confirmAction(`did you mean /${lowerInput}?`);
+      if (confirmed) {
+        await this.handleInput(`/${input}`);
+        return;
+      }
+      // User said no — fall through to free text
     }
 
     this.state.log.push({ role: "user", content: input, timestamp: Date.now() });
@@ -417,8 +673,10 @@ export class Repl {
         // Handle synthetic follow-up choices
         if (/show rendered page/i.test(choice.label)) {
           render.status("opening browser window...");
-          await this.engine.show();
-          this.reattach();
+          const created = await this.engine.show();
+          if (created) {
+            this.reattach();
+          }
           this.rl.prompt();
           return;
         }
@@ -426,10 +684,14 @@ export class Repl {
           await this.shutdown();
           return;
         }
+        if (/log in to this site/i.test(choice.label)) {
+          await this.runLoginFlow();
+          return;
+        }
 
         if (choice.url) {
           // Skip anchor-only links (e.g. #site-content)
-          if (choice.url.startsWith("#") || (choice.url.includes("#") && new URL(choice.url).pathname === new URL(this.nav.currentUrl()).pathname)) {
+          if (choice.url.startsWith("#") || (choice.url.includes("#") && new URL(choice.url).pathname === new URL(this.state.currentUrl).pathname)) {
             render.status("anchor link — staying on current page");
           } else {
             this.pushPageState();
@@ -460,6 +722,8 @@ export class Repl {
 
         // Wait briefly for API responses
         await this.engine.getPage().waitForTimeout(500);
+        // Update currentUrl to wherever the browser ended up
+        try { this.state.currentUrl = this.nav.currentUrl(); } catch { /* dead page */ }
         await this.processCurrentPage();
         this.rl.prompt();
         return;
@@ -565,24 +829,33 @@ export class Repl {
    * Push current page state onto the stack before navigating away.
    */
   private pushPageState(): void {
-    if (this.state.currentInterpretation) {
-      this.state.pageStack.push({
-        url: this.nav.currentUrl(),
-        pageTitle: this.state.lastPageTitle,
-        interpretation: this.state.currentInterpretation,
-        userGoal: this.state.userGoal,
-      });
+    const snapshot = this.captureSnapshot();
+    if (snapshot) {
+      this.state.pageStack.push(snapshot);
     }
+    // New navigation invalidates forward history (same as real browsers)
+    this.state.forwardStack = [];
   }
 
   /**
-   * Pop and restore the previous page state (for /back).
-   * Returns true if a snapshot was restored, false if stack is empty.
+   * Capture current REPL state as a snapshot (pure data, no browser access).
    */
-  private popPageState(): boolean {
-    const snapshot = this.state.pageStack.pop();
-    if (!snapshot) return false;
+  private captureSnapshot(): PageSnapshot | null {
+    if (!this.state.currentInterpretation) return null;
+    return {
+      url: this.state.currentUrl,
+      pageTitle: this.state.lastPageTitle,
+      interpretation: this.state.currentInterpretation,
+      userGoal: this.state.userGoal,
+    };
+  }
 
+  /**
+   * Restore a snapshot into current REPL state and render cached content.
+   * Pure data + display — no browser access.
+   */
+  private restoreSnapshot(snapshot: PageSnapshot): void {
+    this.state.currentUrl = snapshot.url;
     this.state.userGoal = snapshot.userGoal;
     this.state.lastPageTitle = snapshot.pageTitle;
     this.setInterpretation(snapshot.interpretation);
@@ -598,8 +871,6 @@ export class Repl {
     if (snapshot.interpretation.choices.length > 0) {
       render.choices(snapshot.interpretation.choices.map((c) => ({ index: c.index, label: c.label })));
     }
-
-    return true;
   }
 
   private findRelevantApiData(): unknown | null {
@@ -653,7 +924,7 @@ export class Repl {
   }
 
   private inferResource(): string {
-    const url = this.nav.currentUrl();
+    const url = this.state.currentUrl || "about:blank";
     const parsed = new URL(url);
     // Flatten path to a safe filename: /us/politics/article → us-politics-article
     const path = parsed.pathname
@@ -672,7 +943,7 @@ export class Repl {
    */
   private currentSite(): string {
     try {
-      const url = this.nav.currentUrl();
+      const url = this.state.currentUrl;
       return new URL(url).hostname.replace(/^www\./, "").split(".")[0];
     } catch {
       return this.state.site;
@@ -722,6 +993,10 @@ export class Repl {
     this.state.log.push({ role: "agent", content: msg, timestamp: Date.now() });
   }
 
+  private logCommand(cmd: string): void {
+    this.state.log.push({ role: "user", content: cmd, timestamp: Date.now() });
+  }
+
   private reattach(): void {
     const page = this.engine.getPage();
     this.nav = new PageNavigator(page);
@@ -739,7 +1014,7 @@ export class Repl {
       const filepath = saveData(this.currentSite(), this.inferResource(), this.state.lastExtracted);
       render.success(`data saved to ${filepath}`);
     }
-    const logpath = saveSessionLog(this.currentSite(), this.state.log);
+    const logpath = saveSessionLog(this.state.site, this.state.log);
     render.success(`session log saved to ${logpath}`);
   }
 

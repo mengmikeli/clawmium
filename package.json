@@ -8,6 +8,7 @@
     "cityserve:watch": "tsx watch cityserve/server.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:browser": "tsx src/browser/__test__.ts",
+    "test:recover": "tsx src/browser/__test__recover.ts",
     "test:llm": "tsx src/llm/__test__.ts",
     "clm": "tsx src/index.ts"
   },
