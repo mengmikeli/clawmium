@@ -33,9 +33,6 @@ clawmium/
 │
 ├── src/                     # CLM agent + CLI
 │   ├── index.ts             # Entry point — CLI arg parsing, provider setup, default URL
-│   ├── cli/
-│   │   ├── repl.ts          # Main REPL loop — slash commands, choice selection, free-text LLM conversation
-│   │   └── renderer.ts      # ANSI terminal output (banner, contentBox, dataTable, choices, status lines)
 │   ├── browser/
 │   │   ├── engine.ts        # BrowserEngine — launch/show/hide (cookie transfer), isAlive/recover
 │   │   ├── navigator.ts     # PageNavigator — goto (timeout fallback), extractContent, goBack
@@ -51,6 +48,14 @@ clawmium/
 │   ├── auth/
 │   │   ├── detector.ts      # Login page detection (weighted heuristics, threshold 0.5)
 │   │   └── handoff.ts       # CLI auth — raw stdin, password masked, retry loop (3 attempts)
+│   ├── sites/
+│   │   └── hn.ts            # HN domain detection, comment extraction, LLM formatting
+│   ├── forms/
+│   │   └── detector.ts      # Interactive form detection (search, filter)
+│   ├── cli/
+│   │   ├── repl.ts          # Main REPL loop — slash commands, choice selection, free-text LLM conversation
+│   │   ├── renderer.ts      # ANSI terminal output (banner, contentBox, dataTable, commentThread, choices, status lines)
+│   │   └── goals.ts         # Pure functions: formatGoal(), addBreadcrumb()
 │   └── output/
 │       └── writer.ts        # Save data + session logs to ~/clm/{site}/
 │
@@ -65,7 +70,9 @@ clawmium/
     ├── 2026-02-13-0.md      # Original CLAUD.md (pre-implementation design spec)
     ├── 2026-02-13-1.md      # Learnings from first build session
     ├── 2026-02-14-0.md      # REPL stack refactor — who owns the current URL?
-    └── 2026-02-14-1.md      # Rewriting CLAUD.md from design spec to implementation reference
+    ├── 2026-02-14-1.md      # Rewriting CLAUD.md from design spec to implementation reference
+    ├── 2026-02-15-0.md      # Phase 5: HN comments, forms, goals, reflection ritual
+    └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
 ## Architecture
@@ -310,12 +317,12 @@ Every async operation has a fallback chain:
 
 - Anti-bot sites (NYT, some news sites) may return empty content
 - No stealth mode (no `playwright-extra` / puppeteer-stealth)
-- HN comment threads not yet rendered as content (clicks go to external link)
+- HN comment threads rendered as content with `commentThread()` display — top 30 comments extracted, LLM summarizes discussion themes
 - Anthropic provider less tested than OpenAI
 - `max_tokens` fixed at 1024 — long articles may get truncated summaries
 - No session persistence / resume across runs
 - No OAuth/SSO/2FA flows
-- Goals don't carry across navigations — "Find AI articles" on HN → click article → agent forgets context
+- Goals now carry via `GoalContext` (breadcrumb + activeIntent), but still reset on external `/goto`
 
 ## Design History
 
@@ -329,3 +336,5 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **Fallback chains everywhere** — `networkidle` timeout, crash recovery, scroll-to-load, sparse content detection
 - **REPL stack refactor (2026-02-14)** — `state.currentUrl` replaces `page.url()` as source of truth. `syncBrowser()` replaces `ensureBrowser()`/`isAlive()`. `/back` and `/forward` are pure stack mutations. Added `/home`, `/refresh`, `/forward`, `/url` commands. See `learnings/2026-02-14-0.md`.
 - **`commands.ts` removed** — all command handling lives inline in `repl.ts`
+- **Phase 5: HN, forms, goals (2026-02-15)** — HN comment thread extraction + rendering, interactive form detection (search/filter with `fillPlan`), `GoalContext` replaces flat `userGoal` string (baseGoal + activeIntent + breadcrumb trail). New files: `src/sites/hn.ts`, `src/forms/detector.ts`, `src/cli/goals.ts`. See `learnings/2026-02-15-0.md`.
+- **Daily reflection ritual (2026-02-15)** — `/reflect` end-of-day and `/standup` start-of-day workflows via Claude Code skill. Persistent TODO at `learnings/TODO.md`.

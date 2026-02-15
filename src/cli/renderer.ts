@@ -136,6 +136,49 @@ export function contentBox(title: string, text: string, width = 76): void {
   console.log();
 }
 
+export function commentThread(
+  title: string,
+  comments: Array<{ author: string; age: string; text: string; depth: number }>,
+  maxDisplay = 15,
+  width = 76,
+): void {
+  const innerWidth = width - 4;
+
+  console.log();
+  console.log(`  ${BOLD}${title}${RESET}`);
+  console.log(`  ${"─".repeat(innerWidth)}`);
+
+  const shown = comments.slice(0, maxDisplay);
+  for (const comment of shown) {
+    const indent = "  ".repeat(comment.depth);
+    const prefix = `  ${indent}`;
+
+    // Author + age header
+    console.log(`${prefix}${CYAN}${comment.author}${RESET} ${DIM}${comment.age}${RESET}`);
+
+    // Word-wrap comment text
+    const availWidth = innerWidth - indent.length * 2 - 2;
+    const words = comment.text.split(/\s+/);
+    let line = "";
+    for (const word of words) {
+      if (line.length + word.length + 1 > availWidth) {
+        console.log(`${prefix}${WHITE}${line}${RESET}`);
+        line = word;
+      } else {
+        line = line ? `${line} ${word}` : word;
+      }
+    }
+    if (line) console.log(`${prefix}${WHITE}${line}${RESET}`);
+    console.log();
+  }
+
+  if (comments.length > maxDisplay) {
+    console.log(`  ${DIM}... and ${comments.length - maxDisplay} more comments${RESET}`);
+  }
+  console.log(`  ${"─".repeat(innerWidth)}`);
+  console.log();
+}
+
 export function promptString(): string {
   return `${CYAN}> ${RESET}`;
 }

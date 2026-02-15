@@ -4,7 +4,9 @@ import { PageNavigator, PageContent } from "../browser/navigator";
 import { NetworkInterceptor } from "../browser/network";
 import { detectLoginPage } from "../auth/detector";
 import { performCLIAuth } from "../auth/handoff";
-import { LLMProvider, PageInterpretation, ConversationContext, ExtractedData } from "../llm/provider";
+import { LLMProvider, PageInterpretation, ConversationContext, ExtractedData, GoalContext } from "../llm/provider";
+import { isHNItemPage, extractHNComments, formatHNPageForLLM } from "../sites/hn";
+import { formatGoal, addBreadcrumb } from "./goals";
 import * as render from "./renderer";
 import { saveData, saveSessionLog, loadConfig, saveConfig } from "../output/writer";
 
@@ -18,11 +20,11 @@ interface PageSnapshot {
   url: string;
   pageTitle: string;
   interpretation: PageInterpretation;
-  userGoal: string;
+  goalContext: GoalContext;
 }
 
 interface SessionState {
-  userGoal: string;
+  goalContext: GoalContext;
   currentInterpretation: PageInterpretation | null;
   previousInterpretation: PageInterpretation | null;
   lastExtracted: ExtractedData | null;
@@ -77,7 +79,7 @@ export class Repl {
     this.interceptor = new NetworkInterceptor();
     const config = loadConfig();
     this.state = {
-      userGoal,
+      goalContext: { baseGoal: userGoal, activeIntent: "", breadcrumb: [] },
       currentInterpretation: null,
       previousInterpretation: null,
       lastExtracted: null,
@@ -109,7 +111,7 @@ export class Repl {
         try {
           const hostname = new URL(startUrl).hostname;
           this.state.site = hostname.replace(/^www\./, "").split(".")[0];
-          this.state.userGoal = `browsing ${hostname}`;
+          this.state.goalContext = { baseGoal: `browsing ${hostname}`, activeIntent: "", breadcrumb: [] };
           this.engine.setBaseUrl(new URL(startUrl).origin);
         } catch { /* invalid home URL — will fail on navigation */ }
       }
@@ -207,6 +209,14 @@ export class Repl {
 
   private get signal(): AbortSignal | undefined {
     return this.abortController?.signal;
+  }
+
+  private formatGoal(): string {
+    return formatGoal(this.state.goalContext);
+  }
+
+  private addBreadcrumb(label: string): void {
+    addBreadcrumb(this.state.goalContext, label);
   }
 
   /**
@@ -325,6 +335,56 @@ export class Repl {
       this.logAgent("Login page detected — available as optional choice");
     }
 
+    // HN item page — special handling for comment threads
+    if (isHNItemPage(this.state.currentUrl)) {
+      const hnItem = await extractHNComments(page);
+      if (hnItem) {
+        this.state.lastPageTitle = hnItem.title;
+        render.status(`page loaded: "${hnItem.title}"`);
+        this.logAgent(`HN discussion: "${hnItem.title}" (${hnItem.commentCount} comments)`);
+
+        // Render comment thread in terminal
+        render.commentThread(hnItem.title, hnItem.comments);
+
+        // Send to LLM for summary
+        const hnText = formatHNPageForLLM(hnItem);
+        render.status("analyzing discussion...");
+        const interpretation = await withTimeout(
+          this.llm.interpret(hnText, this.formatGoal(), this.state.goalContext.activeIntent || undefined),
+          LLM_TIMEOUT,
+          "LLM interpret",
+          this.signal
+        );
+        this.setInterpretation(interpretation);
+
+        if (interpretation.summary) {
+          render.contentBox(hnItem.title, interpretation.summary);
+          this.logAgent(interpretation.summary);
+        }
+
+        // Build choices: "Read linked article" if external URL exists
+        const choices = interpretation.choices;
+        if (hnItem.articleUrl) {
+          choices.unshift({
+            index: 0,
+            label: "Read linked article",
+            action: "navigate",
+            url: hnItem.articleUrl,
+          });
+          // Re-index
+          for (let i = 0; i < choices.length; i++) {
+            choices[i].index = i + 1;
+          }
+        }
+
+        this.appendSystemChoices(interpretation);
+        if (interpretation.choices.length > 0) {
+          render.choices(interpretation.choices.map((c) => ({ index: c.index, label: c.label })));
+        }
+        return;
+      }
+    }
+
     // Extract page content
     const content = await this.nav.extractContent();
     this.state.lastPageTitle = content.title;
@@ -365,8 +425,9 @@ export class Repl {
       }
     }
     render.status("analyzing page...");
+    const conversationCtx = this.state.goalContext.activeIntent || undefined;
     const interpretation = await withTimeout(
-      this.llm.interpret(pageText, this.state.userGoal),
+      this.llm.interpret(pageText, this.formatGoal(), conversationCtx),
       LLM_TIMEOUT,
       "LLM interpret",
       this.signal
@@ -387,14 +448,7 @@ export class Repl {
         this.logAgent(interpretation.summary);
       }
 
-      // Append login choice if login form was detected
-      if (this.state.loginAvailable) {
-        interpretation.choices.push({
-          index: interpretation.choices.length + 1,
-          label: "Log in to this site",
-          action: "click",
-        });
-      }
+      this.appendSystemChoices(interpretation);
 
       // Show navigation choices if any
       if (interpretation.choices.length > 0) {
@@ -403,6 +457,20 @@ export class Repl {
       } else {
         this.suggestCommands();
       }
+    }
+  }
+
+  /**
+   * Append system-managed choices (forms, login) to an interpretation.
+   */
+  private appendSystemChoices(interpretation: PageInterpretation): void {
+    // Append login choice if login form was detected
+    if (this.state.loginAvailable) {
+      interpretation.choices.push({
+        index: interpretation.choices.length + 1,
+        label: "Log in to this site",
+        action: "click",
+      });
     }
   }
 
@@ -464,7 +532,7 @@ export class Repl {
           }
           // Reset goal and base URL when navigating to an external site
           if (isExternal) {
-            this.state.userGoal = `browsing ${new URL(url).hostname}`;
+            this.state.goalContext = { baseGoal: `browsing ${new URL(url).hostname}`, activeIntent: "", breadcrumb: [] };
             const origin = new URL(url).origin;
             this.engine.setBaseUrl(origin);
             this.state.site = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
@@ -564,7 +632,7 @@ export class Repl {
             await this.syncBrowser();
             this.pushPageState();
             this.interceptor.clear();
-            this.state.userGoal = `browsing ${new URL(this.state.homeUrl).hostname}`;
+            this.state.goalContext = { baseGoal: `browsing ${new URL(this.state.homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
             await this.nav.goto(this.state.homeUrl);
             this.state.currentUrl = this.state.homeUrl;
             await this.engine.getPage().waitForTimeout(500);
@@ -592,7 +660,7 @@ export class Repl {
           await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
-          this.state.userGoal = `browsing ${new URL(homeUrl).hostname}`;
+          this.state.goalContext = { baseGoal: `browsing ${new URL(homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
           await this.nav.goto(homeUrl);
           this.state.currentUrl = homeUrl;
           await this.engine.getPage().waitForTimeout(500);
@@ -626,7 +694,7 @@ export class Repl {
 
         case "demo": {
           const demoUrl = process.env.BASE_URL || "http://localhost:3000";
-          this.state.userGoal = "check my water bill";
+          this.state.goalContext = { baseGoal: "check my water bill", activeIntent: "", breadcrumb: [] };
           render.status(`starting CityServe demo at ${demoUrl}...`);
           await this.syncBrowser();
           this.pushPageState();
@@ -689,6 +757,51 @@ export class Repl {
           return;
         }
 
+        // Handle fill choices (search, filter — LLM-generated fill plans)
+        if (choice.action === "fill" && choice.fillPlan) {
+          const plan = choice.fillPlan;
+          const query = await new Promise<string>((resolve) => {
+            this.rl.question("  search query: ", resolve);
+          });
+          const trimmedQuery = query.trim();
+          if (!trimmedQuery) { this.rl.prompt(); return; }
+
+          render.status(`searching for "${trimmedQuery}"...`);
+          await this.syncBrowser();
+          const page = this.engine.getPage();
+          try {
+            await page.fill(plan.inputSelector, trimmedQuery);
+            if (plan.submitAction === "click" && plan.submitSelector) {
+              await page.click(plan.submitSelector);
+            } else {
+              await page.press(plan.inputSelector, "Enter");
+            }
+            await page.waitForLoadState("networkidle").catch(() => {});
+            await page.waitForTimeout(500);
+          } catch {
+            // Fallback: try form.submit() on the closest form
+            render.warn("form submission failed — trying form.submit()");
+            try {
+              await page.evaluate((sel) => {
+                const el = document.querySelector(sel);
+                const form = el?.closest("form") as HTMLFormElement | null;
+                form?.submit();
+              }, plan.inputSelector);
+              await page.waitForLoadState("networkidle").catch(() => {});
+            } catch { /* give up */ }
+          }
+          this.pushPageState();
+          try { this.state.currentUrl = this.nav.currentUrl(); } catch {}
+          this.state.goalContext.activeIntent = trimmedQuery;
+          this.addBreadcrumb(`search: ${trimmedQuery}`);
+          await this.processCurrentPage();
+          this.rl.prompt();
+          return;
+        }
+
+        // Add breadcrumb for navigation choices
+        this.addBreadcrumb(choice.label);
+
         if (choice.url) {
           // Skip anchor-only links (e.g. #site-content)
           if (choice.url.startsWith("#") || (choice.url.includes("#") && new URL(choice.url).pathname === new URL(this.state.currentUrl).pathname)) {
@@ -750,6 +863,10 @@ export class Repl {
     // Free text — send to LLM as a follow-up question with context
     this.state.history.push({ role: "user", content: input });
 
+    // Set user's free text as the active intent
+    this.state.goalContext.activeIntent = input;
+
+    await this.syncBrowser();
     const content = await this.nav.extractContent();
     const pageText = this.buildPageText(content);
     render.status("thinking...");
@@ -761,7 +878,7 @@ export class Repl {
     }
 
     const interpretation = await withTimeout(
-      this.llm.interpret(pageText, this.state.userGoal, conversationContext),
+      this.llm.interpret(pageText, this.formatGoal(), conversationContext),
       LLM_TIMEOUT,
       "LLM interpret",
       this.signal
@@ -846,7 +963,7 @@ export class Repl {
       url: this.state.currentUrl,
       pageTitle: this.state.lastPageTitle,
       interpretation: this.state.currentInterpretation,
-      userGoal: this.state.userGoal,
+      goalContext: { ...this.state.goalContext, breadcrumb: [...this.state.goalContext.breadcrumb] },
     };
   }
 
@@ -856,7 +973,7 @@ export class Repl {
    */
   private restoreSnapshot(snapshot: PageSnapshot): void {
     this.state.currentUrl = snapshot.url;
-    this.state.userGoal = snapshot.userGoal;
+    this.state.goalContext = { ...snapshot.goalContext, breadcrumb: [...snapshot.goalContext.breadcrumb] };
     this.state.lastPageTitle = snapshot.pageTitle;
     this.setInterpretation(snapshot.interpretation);
 
@@ -891,7 +1008,7 @@ export class Repl {
   private async extractAndDisplay(rawData: string): Promise<void> {
     render.status("extracting data...");
     const extracted = await withTimeout(
-      this.llm.extractData(rawData, this.state.userGoal),
+      this.llm.extractData(rawData, this.formatGoal()),
       LLM_TIMEOUT,
       "LLM extract",
       this.signal

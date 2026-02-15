@@ -5,7 +5,7 @@ Respond with ONLY valid JSON matching this schema:
   "pageType": "navigation" | "content" | "login" | "form" | "data" | "confirmation",
   "summary": "A meaningful summary of the page's ACTUAL CONTENT — not just its structure",
   "choices": [
-    { "index": 1, "label": "Human-readable label", "action": "click" | "navigate", "selector": "CSS selector if clicking", "url": "URL if navigating" }
+    { "index": 1, "label": "Human-readable label", "action": "click" | "navigate" | "fill", "selector": "CSS selector if clicking", "url": "URL if navigating", "fillPlan": { "inputSelector": "CSS selector", "submitAction": "enter" | "click", "submitSelector": "CSS selector" } }
   ],
   "dataFound": null or { ...extracted key-value data from the page... },
   "requiresAuth": true/false,
@@ -27,7 +27,10 @@ Rules:
 - Index choices starting at 1
 - Limit choices to the 10 most relevant options
 - If the visible text is empty or very short, set summary to "Page content is empty (possible anti-bot protection, paywall, or lazy loading)" and return empty choices. Do NOT guess or fabricate content from the URL alone.
-- FOLLOW-UP QUESTIONS: If "Conversation context" is provided, the user is asking a follow-up question about the page. In this case, answer their specific question in the "summary" field using the page content. Do NOT just re-describe the page — directly address what they asked. For example, if they ask "why is this important", explain the significance. If they ask "what are the key takeaways", provide bullet points. You may return fewer or no choices for follow-up responses.`;
+- FOLLOW-UP QUESTIONS: If "Conversation context" is provided, the user is asking a follow-up question about the page. In this case, answer their specific question in the "summary" field using the page content. Do NOT just re-describe the page — directly address what they asked. For example, if they ask "why is this important", explain the significance. If they ask "what are the key takeaways", provide bullet points. You may return fewer or no choices for follow-up responses.
+- HACKER NEWS LISTINGS: For Hacker News listing pages (news.ycombinator.com front page, /newest, /best, etc.): each story has a title link (external article) and a comments link (item?id=...). Include BOTH as separate choices so the user can choose between reading the article and reading the discussion. Format: "Story Title" for article, "Story Title (comments)" for the discussion page.
+- HACKER NEWS DISCUSSIONS: For Hacker News discussion pages (item?id=...): the content includes a comment thread. Summarize the key themes and notable perspectives. Set pageType to "content". Do NOT list individual comments as choices.
+- INTERACTIVE FORMS: When the page has fillable forms (search boxes, filters, text inputs), include them as choices with action: "fill" and a fillPlan object. fillPlan has: inputSelector (CSS selector for the input/textarea to fill — prefer #id, then [name="..."], then tag-based), submitAction ("enter" to press Enter on the input, or "click" to click a submit button), submitSelector (CSS selector for the submit button — required when submitAction is "click"). Label should describe the action: "Search Google", "Search packages", "Filter by date", etc. Use the form data provided (form IDs, input names/types/labels/placeholders) to build accurate selectors. Do NOT emit fill choices for password/login forms (handled separately by the auth system).`;
 
 export const PLAN_ACTION_SYSTEM_PROMPT = `You are a browser agent deciding the next action to take. Given a page interpretation and conversation context, decide what to do next.
 
