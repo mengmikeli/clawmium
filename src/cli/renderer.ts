@@ -92,7 +92,8 @@ export function help(): void {
   console.log(`  ${CYAN}/refresh${RESET}       Re-analyze current page`);
   console.log(`  ${CYAN}/login${RESET}         Log in to current site`);
   console.log(`  ${CYAN}/save${RESET}          Save data to disk`);
-  console.log(`  ${CYAN}/url${RESET}           Show current URL and stack`);
+  console.log(`  ${CYAN}/url${RESET}           Show current URL`);
+  console.log(`  ${CYAN}/stack${RESET}         Show URL stack and sync status`);
   console.log(`  ${CYAN}/tree${RESET}          Show crawl navigation tree`);
   console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
   console.log(`  ${CYAN}/demo${RESET}          Run CityServe demo`);

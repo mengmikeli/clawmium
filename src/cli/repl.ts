@@ -740,6 +740,12 @@ export class Repl {
           return;
 
         case "url": {
+          console.log(this.state.currentUrl || "(no URL)");
+          this.rl.prompt();
+          return;
+        }
+
+        case "stack": {
           let browserUrl = "(unknown)";
           try { browserUrl = this.engine.getPage().url(); } catch { /* dead page */ }
           const synced = browserUrl === this.state.currentUrl;
@@ -848,7 +854,7 @@ export class Repl {
     }
 
     // Command-like input detection — prompt if user typed a bare command name
-    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "tree", "clear"];
+    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "tree", "clear"];
     const lowerInput = input.toLowerCase();
     if (knownCommands.includes(lowerInput) || knownCommands.some(c => lowerInput.startsWith(c + " "))) {
       const confirmed = await this.confirmAction(`did you mean /${lowerInput}?`);
