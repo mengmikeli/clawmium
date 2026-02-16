@@ -1,6 +1,6 @@
 {
   "name": "clawmium",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent-first, human-second browser",
   "main": "index.js",
   "scripts": {
@@ -12,6 +12,8 @@
     "test:phase5": "tsx src/__test__phase5.ts",
     "test:llm": "tsx src/llm/__test__.ts",
     "test:crawl": "tsx src/__test__crawl.ts",
+    "test:crawl-llm": "tsx src/__test__crawl_llm.ts",
+    "test:crawl-phase4": "tsx src/__test__crawl_phase4.ts",
     "clm": "tsx src/index.ts"
   },
   "keywords": [],

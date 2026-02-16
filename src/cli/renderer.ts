@@ -58,13 +58,13 @@ export function intercepted(method: string, url: string, statusCode: number, siz
 export function banner(provider: string): void {
   const providerLabel = provider === "openai" ? "GPT-4o (openai)" : "Claude (anthropic)";
   const lines = [
-    `${BOLD}Clawmium v0.1${RESET}`,
+    `${BOLD}Clawmium v0.2${RESET}`,
     "Agent-first browser",
     `Provider: ${providerLabel}`,
   ];
   // Visible lengths (without ANSI codes)
   const visibleLengths = [
-    "Clawmium v0.1".length,
+    "Clawmium v0.2".length,
     "Agent-first browser".length,
     `Provider: ${providerLabel}`.length,
   ];
@@ -95,6 +95,7 @@ export function help(): void {
   console.log(`  ${CYAN}/url${RESET}           Show current URL`);
   console.log(`  ${CYAN}/stack${RESET}         Show URL stack and sync status`);
   console.log(`  ${CYAN}/tree${RESET}          Show crawl navigation tree`);
+  console.log(`  ${CYAN}/crawl${RESET}         Manage crawls (list, load, rename, end, info)`);
   console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
   console.log(`  ${CYAN}/demo${RESET}          Run CityServe demo`);
   console.log(`  ${CYAN}/quit${RESET}          End session`);
@@ -196,5 +197,64 @@ export function clearSummary(items: string[]): void {
   for (const item of items) {
     console.log(`  ${YELLOW}•${RESET} ${item}`);
   }
+  console.log();
+}
+
+export function crawlList(crawls: Array<{ index: number; name: string; rootUrl: string; nodeCount: number; created: number }>): void {
+  console.log();
+  console.log(`  ${BOLD}Saved crawls:${RESET}`);
+  console.log();
+  for (const c of crawls) {
+    const date = new Date(c.created);
+    const dateStr = date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    console.log(`  ${CYAN}[${c.index}]${RESET} ${WHITE}${c.name}${RESET}`);
+    let hostname: string;
+    try {
+      hostname = new URL(c.rootUrl).hostname;
+    } catch {
+      hostname = c.rootUrl;
+    }
+    console.log(`      ${DIM}${hostname} · ${c.nodeCount} node${c.nodeCount !== 1 ? "s" : ""} · ${dateStr}${RESET}`);
+  }
+  console.log();
+}
+
+export function crawlInfo(name: string, created: number, nodeCount: number, rootUrl: string, currentNodeTitle: string): void {
+  const date = new Date(created);
+  const dateStr = date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  let hostname: string;
+  try {
+    hostname = new URL(rootUrl).hostname;
+  } catch {
+    hostname = rootUrl;
+  }
+
+  const fields: Record<string, string> = {
+    Created: dateStr,
+    Root: hostname,
+    Nodes: String(nodeCount),
+    Current: currentNodeTitle || "(unknown)",
+  };
+
+  const entries = Object.entries(fields);
+  const maxKeyLen = Math.max(...entries.map(([k]) => k.length));
+  const maxValLen = Math.max(...entries.map(([, v]) => v.length));
+  const innerWidth = Math.max(maxKeyLen + maxValLen + 4, name.length + 2, 36);
+
+  console.log();
+  console.log(`  ${BOLD}Active crawl: "${name}"${RESET}`);
+  console.log(`  ┌${"─".repeat(innerWidth + 2)}┐`);
+  for (const [key, value] of entries) {
+    const padding = " ".repeat(Math.max(0, innerWidth - key.length - value.length - 4));
+    console.log(`  │ ${BOLD}${key}:${RESET}  ${value}${padding} │`);
+  }
+  console.log(`  └${"─".repeat(innerWidth + 2)}┘`);
   console.log();
 }

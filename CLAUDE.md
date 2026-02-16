@@ -52,12 +52,20 @@ clawmium/
 │   │   └── hn.ts            # HN domain detection, comment extraction, LLM formatting
 │   ├── forms/
 │   │   └── detector.ts      # Interactive form detection (search, filter)
+│   ├── crawl/
+│   │   ├── tree.ts          # CrawlManager — node tree, navigation tracking, enriched display
+│   │   ├── persistence.ts   # Save/load/list/peek crawls as markdown to ~/clm/crawls/
+│   │   ├── context.ts       # Ancestor chain formatting for LLM context, tree-derived breadcrumbs
+│   │   └── namer.ts         # Derive crawl names from page summary + user goal
 │   ├── cli/
 │   │   ├── repl.ts          # Main REPL loop — slash commands, choice selection, free-text LLM conversation
 │   │   ├── renderer.ts      # ANSI terminal output (banner, contentBox, dataTable, commentThread, choices, status lines)
 │   │   └── goals.ts         # Pure functions: formatGoal(), addBreadcrumb()
-│   └── output/
-│       └── writer.ts        # Save data + session logs to ~/clm/{site}/
+│   ├── output/
+│   │   └── writer.ts        # Save data + session logs to ~/clm/{site}/
+│   ├── __test__crawl.ts         # Crawl tree + persistence (113 assertions)
+│   ├── __test__crawl_llm.ts     # Crawl LLM integration (48 assertions)
+│   └── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
 │
 ├── cityserve/               # Mock government website (CityServe)
 │   ├── server.ts            # Express server
@@ -75,6 +83,7 @@ clawmium/
     ├── 2026-02-16-0.md      # Architecture alignment — eight design decisions
     ├── 2026-02-16-1.md      # Crawls design review — GoalContext feedback loop
     ├── 2026-02-16-2.md      # Form detection wiring + navigator error handling
+    ├── 2026-02-16-3.md      # Crawl Phase 4 — command layer, enriched display, session log persistence
     └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
@@ -191,6 +200,7 @@ interface SessionState {
   loginAvailable: boolean;                   // True when login page detected
   detectedForms: DetectedForm[];             // Interactive forms found on current page
   homeUrl: string;                           // Persisted home URL, saved/restored via saveConfig()
+  pendingReachedBy: ReachedBy | null;        // Set before navigation, consumed by trackNavigation()
 }
 ```
 
@@ -207,6 +217,26 @@ Guard flags:
 - `shuttingDown` — prevents double shutdown (rl.close fires close event)
 - `closingForAuth` — prevents shutdown when closing readline for auth handoff
 - `muteInterceptor` — suppresses network logs during auth
+
+### Crawl System
+
+Every navigation is recorded as a node in a tree. The tree persists to markdown files at `~/clm/crawls/`, capturing the user's browsing path with LLM summaries.
+
+**CrawlManager** (`src/crawl/tree.ts`):
+- Auto-creates a new crawl on first navigation (no explicit "start crawl" step)
+- Each node stores: URL, title, timestamp, `reachedBy` (choice/goto/back/forward/auto), parent ID, children
+- Deduplicates by URL — navigating to an already-visited URL moves the cursor without creating a new node
+- `getDisplayTree()` returns plain text tree for markdown persistence; `getEnrichedDisplayTree()` adds ANSI colors, current-node marker (`→`), reachedBy icons, and inline summaries
+
+**Node metadata**: After each `interpret()` call, the REPL populates the current node's `metadata.summary` (LLM summary) and `metadata.conversationSnippets` (follow-up Q&A). This data appears in the enriched tree display and saved crawl files.
+
+**Ancestor context** (`src/crawl/context.ts`): `formatAncestorContext()` builds a "Navigation path" string from the current node's ancestors (up to 3 levels). Fed into LLM interpret calls so the model knows where the user has been.
+
+**Naming** (`src/crawl/namer.ts`): `deriveCrawlName()` auto-names crawls from the first page summary via a priority chain: user-set goal → first clause of LLM summary → hostname + date. No extra LLM call.
+
+**Persistence** (`src/crawl/persistence.ts`): Crawls saved as markdown at `~/clm/crawls/{id}.md`. Format has three sections: `## Tree` (ASCII tree), `## Nodes` (one `### heading` per node with URL/timestamp/summary), `## Session Log` (timestamped log entries filtered to crawl's time range). `peekCrawl()` reads header-only for listing without full parse. `loadCrawl()` fully restores a CrawlManager from markdown.
+
+**`pendingReachedBy` pattern**: The REPL sets `state.pendingReachedBy` before navigation (e.g., "choice", "goto"). `trackNavigation()` consumes it after the page loads to record how the user reached the new page. This decouples navigation intent from navigation execution.
 
 ### LLM Provider Interface
 
@@ -239,6 +269,9 @@ ANTHROPIC_API_KEY=sk-ant-...
 | `/url` | Show current URL (one line, copy-pasteable) |
 | `/stack` | Debug: show REPL URL vs browser URL, sync status, back/forward stacks |
 | `/save` | Save extracted data + session log to disk |
+| `/tree` | Show crawl navigation tree (enriched: summaries, icons, current marker) |
+| `/crawl` | Manage crawls: list, load, rename, end, info |
+| `/clear` | Reset state: repl, crawl, browser, or all (crawl auto-saves) |
 | `/demo` | Run CityServe demo (localhost:3000, goal: "check my water bill") |
 | `/quit` | Save and exit |
 | `/help` | Show command list |
@@ -297,6 +330,9 @@ npm run test:browser       # Browser integration (needs CityServe running)
 npm run test:llm           # LLM provider test
 npm run test:phase5        # Form detection, HN, goals, appendSystemChoices (91 assertions)
 npm run test:recover       # Browser crash recovery (14 tests)
+npm run test:crawl         # Crawl tree + persistence (113 assertions)
+npm run test:crawl-llm     # Crawl LLM integration (48 assertions)
+npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
 ```
 
 ## File Output
@@ -305,6 +341,8 @@ Saved to `~/clm/{site}/{resource}-{date}.json`:
 
 ```
 ~/clm/
+  crawls/
+    {crawl-id}.md             # Saved crawl tree + session log
   hackernews/
     session-log-2026-02-13.md
   nytimes/
@@ -338,7 +376,7 @@ Every async operation has a fallback chain:
 - HN comment threads rendered as content with `commentThread()` display — top 30 comments extracted, LLM summarizes discussion themes
 - Anthropic provider less tested than OpenAI
 - `max_tokens` fixed at 1024 — long articles may get truncated summaries
-- No session persistence / resume across runs
+- No session persistence / resume across runs (crawl trees persist, but REPL state does not)
 - No OAuth/SSO/2FA flows
 - Google and other sites may trigger CAPTCHA in headless mode
 
@@ -360,3 +398,4 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **Form detection wiring + textarea fix (2026-02-16)** — `detectInteractiveForms()` wired into REPL, `appendSystemChoices()` dedup, `<textarea>` support for Google search, navigator error surfacing (`net::`/HTTP status). See `learnings/2026-02-16-2.md`.
 - **`/url` split (2026-02-16)** — `/url` simplified to print just the current URL. Old debug view (browser URL, sync status, back/forward stacks) moved to new `/stack` command.
 - **`CLAUD.md` renamed to `CLAUDE.md` (2026-02-16)** — The original filename was a typo carried since day one. Earlier learnings files reference `CLAUD.md` — that was the correct name at the time; this is the same file.
+- **Crawl system (2026-02-16)** — Four-phase implementation: Phase 1 (tree data structure + markdown persistence), Phase 2 (REPL wiring across all 10 navigation paths), Phase 3 (LLM integration — auto-naming, ancestor context, tree-derived breadcrumbs), Phase 4 (command layer: `/crawl list|load|rename|end|info`, enriched `/tree` display, session log persistence). 4 new files in `src/crawl/`, 3 test suites, 192 total assertions. See `learnings/2026-02-16-3.md`. Version bumped to 0.2.0.

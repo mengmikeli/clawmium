@@ -1,6 +1,6 @@
 # TODO — Clawmium
 
-> Updated: 2026-02-16 (split /url → /url + /stack)
+> Updated: 2026-02-16 (Crawl Phase 4 done)
 
 ## High
 
@@ -14,13 +14,13 @@
 
 ## Medium
 
-8. **Crawl tree — Phase 3 (LLM integration)** — Lifecycle LLM call: "extend current crawl or start new one?" LLM-driven naming. Feed crawl ancestor context into `interpret()` calls. GoalContext breadcrumb derived from tree when crawl is active.
+8. ~~**Crawl tree — Phase 3 (LLM integration)**~~ — done. LLM-driven naming via `deriveCrawlName()`. Feed crawl ancestor context into `interpret()` calls via `formatAncestorContext()`. GoalContext breadcrumb derived from tree when crawl is active. All 48 crawl-llm tests passing.
 9. **Site quirks registry** — formalize the `sites/hn.ts` pattern. Generic HTML-standard core + site-specific overrides activated on demand (like browser extensions).
 10. **`max_tokens` tuning** — 1024 truncates long HN discussions and article summaries. Scale with input length or page type.
 11. **Anthropic provider parity** — test with `conversationContext`, HN pages, form-heavy sites. Fix when it naturally comes up.
 
 ## Low / Parked
 
-12. **Crawl tree — Phase 4 (polish)** — `/crawl` commands (rename, end, list, load). Display refinements. Session log integration into crawl.md.
+12. ~~**Crawl tree — Phase 4 (polish)**~~ — done. `/crawl` command with subcommands (list, load, rename, end, info). `peekCrawl()` for fast header-only reads. Enriched `/tree` display with summaries, ANSI colors, and reachedBy icons. Session log section in saved crawl markdown.
 13. **Crawl tree — Layer 3 (LLM reorganization)** — drift pruning, sub-tree detach/reattach, convergence detection. Future.
 14. **Session persistence (REPL state)** — save/restore REPL state across runs. Separate from crawl persistence (which is built into the crawl system). Lower priority now that crawls handle their own persistence.

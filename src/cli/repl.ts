@@ -7,13 +7,20 @@ import { DetectedForm, detectInteractiveForms } from "../forms/detector";
 import { performCLIAuth } from "../auth/handoff";
 import { LLMProvider, PageInterpretation, ConversationContext, ExtractedData, GoalContext } from "../llm/provider";
 import { isHNItemPage, extractHNComments, formatHNPageForLLM } from "../sites/hn";
-import { formatGoal, addBreadcrumb } from "./goals";
+import { formatGoal, addBreadcrumb, formatGoalWithCrawl } from "./goals";
 import * as render from "./renderer";
 import { saveData, saveSessionLog, loadConfig, saveConfig } from "../output/writer";
 import { CrawlManager, ReachedBy } from "../crawl/tree";
-import { saveCrawl } from "../crawl/persistence";
+import { saveCrawl, loadCrawl, listCrawls, peekCrawl } from "../crawl/persistence";
+import { deriveCrawlName } from "../crawl/namer";
+import { formatAncestorContext } from "../crawl/context";
 
 const LLM_TIMEOUT = 30_000; // 30s timeout for LLM calls
+
+// ANSI color helpers (duplicated from renderer for inline use)
+const RESET = "\x1b[0m";
+const CYAN = "\x1b[36m";
+const BOLD = "\x1b[1m";
 
 class CancelledError extends Error {
   constructor() { super("cancelled"); }
@@ -221,7 +228,7 @@ export class Repl {
   }
 
   private formatGoal(): string {
-    return formatGoal(this.state.goalContext);
+    return formatGoalWithCrawl(this.state.goalContext, this.crawlManager);
   }
 
   private addBreadcrumb(label: string): void {
@@ -369,13 +376,18 @@ export class Repl {
         // Send to LLM for summary
         const hnText = formatHNPageForLLM(hnItem);
         render.status("analyzing discussion...");
+        const hnAncestorCtx = formatAncestorContext(this.crawlManager);
+        const hnConversationCtx = this.state.goalContext.activeIntent || undefined;
+        const hnFullCtx = [hnAncestorCtx, hnConversationCtx].filter(Boolean).join("\n\n") || undefined;
         const interpretation = await withTimeout(
-          this.llm.interpret(hnText, this.formatGoal(), this.state.goalContext.activeIntent || undefined),
+          this.llm.interpret(hnText, this.formatGoal(), hnFullCtx),
           LLM_TIMEOUT,
           "LLM interpret",
           this.signal
         );
         this.setInterpretation(interpretation);
+        this.storeSummaryOnNode(interpretation.summary);
+        this.maybeNameCrawl(interpretation.summary);
 
         if (interpretation.summary) {
           render.contentBox(hnItem.title, interpretation.summary);
@@ -447,14 +459,18 @@ export class Repl {
       }
     }
     render.status("analyzing page...");
+    const ancestorCtx = formatAncestorContext(this.crawlManager);
     const conversationCtx = this.state.goalContext.activeIntent || undefined;
+    const fullCtx = [ancestorCtx, conversationCtx].filter(Boolean).join("\n\n") || undefined;
     const interpretation = await withTimeout(
-      this.llm.interpret(pageText, this.formatGoal(), conversationCtx),
+      this.llm.interpret(pageText, this.formatGoal(), fullCtx),
       LLM_TIMEOUT,
       "LLM interpret",
       this.signal
     );
     this.setInterpretation(interpretation);
+    this.storeSummaryOnNode(interpretation.summary);
+    this.maybeNameCrawl(interpretation.summary);
 
     // Render based on interpretation
     if (interpretation.dataFound) {
@@ -787,7 +803,7 @@ export class Repl {
         }
 
         case "tree": {
-          const tree = this.crawlManager.getDisplayTree();
+          const tree = this.crawlManager.getEnrichedDisplayTree();
           if (!tree) {
             render.status("no crawl tree yet — navigate to start recording");
           } else {
@@ -798,6 +814,172 @@ export class Repl {
           this.logCommand("/tree");
           this.rl.prompt();
           return;
+        }
+
+        case "crawl": {
+          const sub = parts[1]?.toLowerCase() || "";
+          const subArg = parts.slice(2).join(" ");
+          switch (sub) {
+            case "list": {
+              const ids = listCrawls();
+              if (ids.length === 0) {
+                render.status("no saved crawls");
+                this.rl.prompt();
+                return;
+              }
+              const crawls: Array<{ index: number; name: string; rootUrl: string; nodeCount: number; created: number }> = [];
+              for (const id of ids) {
+                const peek = peekCrawl(id);
+                if (peek) crawls.push({ index: 0, ...peek });
+              }
+              // Sort by created date descending (newest first)
+              crawls.sort((a, b) => b.created - a.created);
+              crawls.forEach((c, i) => { c.index = i + 1; });
+              render.crawlList(crawls);
+              this.logCommand("/crawl list");
+              this.rl.prompt();
+              return;
+            }
+
+            case "load": {
+              const ids = listCrawls();
+              if (ids.length === 0) {
+                render.status("no saved crawls to load");
+                this.rl.prompt();
+                return;
+              }
+              // Build peek list
+              const crawls: Array<{ index: number; id: string; name: string; rootUrl: string; nodeCount: number; created: number }> = [];
+              for (const id of ids) {
+                const peek = peekCrawl(id);
+                if (peek) crawls.push({ index: 0, ...peek });
+              }
+              crawls.sort((a, b) => b.created - a.created);
+              crawls.forEach((c, i) => { c.index = i + 1; });
+
+              let pickNum = parseInt(subArg, 10);
+              if (isNaN(pickNum)) {
+                // Show list and prompt
+                render.crawlList(crawls);
+                const answer = await new Promise<string>((resolve) => {
+                  this.rl.question("  pick a crawl number: ", resolve);
+                });
+                pickNum = parseInt(answer.trim(), 10);
+                if (isNaN(pickNum)) {
+                  render.status("cancelled");
+                  this.rl.prompt();
+                  return;
+                }
+              }
+
+              const picked = crawls.find((c) => c.index === pickNum);
+              if (!picked) {
+                render.error(`no crawl at index ${pickNum}`);
+                this.rl.prompt();
+                return;
+              }
+
+              // Auto-save current crawl if active
+              if (this.crawlManager.activeCrawl) {
+                render.status("auto-saving active crawl...");
+                this.clearCrawl();
+              }
+
+              const loaded = loadCrawl(picked.id, this.crawlManager);
+              if (!loaded) {
+                render.error("failed to load crawl");
+                this.rl.prompt();
+                return;
+              }
+
+              // Set REPL position to the loaded crawl's current node
+              const currentNode = this.crawlManager.currentNodeId
+                ? this.crawlManager.getNode(this.crawlManager.currentNodeId)
+                : null;
+              if (currentNode) {
+                this.state.currentUrl = currentNode.url;
+                this.state.lastPageTitle = currentNode.title;
+              }
+
+              render.success(`loaded crawl: "${this.crawlManager.activeCrawl?.name || picked.name}"`);
+              this.logCommand(`/crawl load ${pickNum}`);
+              this.rl.prompt();
+              return;
+            }
+
+            case "rename": {
+              if (!this.crawlManager.activeCrawl) {
+                render.warn("no active crawl");
+                this.rl.prompt();
+                return;
+              }
+              if (!subArg) {
+                render.error("usage: /crawl rename <name>");
+                this.rl.prompt();
+                return;
+              }
+              this.crawlManager.activeCrawl.name = subArg;
+              render.success(`crawl renamed to: "${subArg}"`);
+              this.logCommand(`/crawl rename ${subArg}`);
+              this.rl.prompt();
+              return;
+            }
+
+            case "end": {
+              if (!this.crawlManager.activeCrawl) {
+                render.warn("no active crawl to end");
+                this.rl.prompt();
+                return;
+              }
+              try {
+                const filepath = saveCrawl(this.crawlManager, this.state.log);
+                this.crawlManager.clear();
+                render.success(`crawl saved to: ${filepath}`);
+              } catch (err) {
+                render.error(`failed to save crawl: ${(err as Error).message}`);
+              }
+              this.logCommand("/crawl end");
+              this.rl.prompt();
+              return;
+            }
+
+            case "info": {
+              if (!this.crawlManager.activeCrawl) {
+                render.warn("no active crawl");
+                this.rl.prompt();
+                return;
+              }
+              const crawl = this.crawlManager.activeCrawl;
+              const rootNode = this.crawlManager.nodes.get(crawl.rootId);
+              const currentNode = this.crawlManager.currentNodeId
+                ? this.crawlManager.getNode(this.crawlManager.currentNodeId)
+                : null;
+              render.crawlInfo(
+                crawl.name,
+                crawl.created,
+                this.crawlManager.nodes.size,
+                rootNode?.url || "(unknown)",
+                currentNode?.title || "(unknown)",
+              );
+              this.logCommand("/crawl info");
+              this.rl.prompt();
+              return;
+            }
+
+            default: {
+              // Show /crawl subcommand help
+              console.log();
+              console.log(`  ${BOLD}Crawl subcommands:${RESET}`);
+              console.log(`  ${CYAN}/crawl list${RESET}           List saved crawls`);
+              console.log(`  ${CYAN}/crawl load [N]${RESET}       Load a saved crawl by number`);
+              console.log(`  ${CYAN}/crawl rename <name>${RESET}  Rename the active crawl`);
+              console.log(`  ${CYAN}/crawl end${RESET}            Save and end the active crawl`);
+              console.log(`  ${CYAN}/crawl info${RESET}           Show active crawl metadata`);
+              console.log();
+              this.rl.prompt();
+              return;
+            }
+          }
         }
 
         case "clear": {
@@ -854,7 +1036,7 @@ export class Repl {
     }
 
     // Command-like input detection — prompt if user typed a bare command name
-    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "tree", "clear"];
+    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "tree", "clear", "crawl"];
     const lowerInput = input.toLowerCase();
     if (knownCommands.includes(lowerInput) || knownCommands.some(c => lowerInput.startsWith(c + " "))) {
       const confirmed = await this.confirmAction(`did you mean /${lowerInput}?`);
@@ -930,15 +1112,19 @@ export class Repl {
           this.pushPageState();
           try { this.state.currentUrl = this.nav.currentUrl(); } catch {}
           this.state.goalContext.activeIntent = trimmedQuery;
-          this.addBreadcrumb(`search: ${trimmedQuery}`);
+          if (!this.crawlManager.activeCrawl) {
+            this.addBreadcrumb(`search: ${trimmedQuery}`);
+          }
           this.state.pendingReachedBy = "choice";
           await this.processCurrentPage();
           this.rl.prompt();
           return;
         }
 
-        // Add breadcrumb for navigation choices
-        this.addBreadcrumb(choice.label);
+        // Add breadcrumb for navigation choices (only when no crawl — tree handles breadcrumbs)
+        if (!this.crawlManager.activeCrawl) {
+          this.addBreadcrumb(choice.label);
+        }
 
         if (choice.url) {
           // Skip anchor-only links (e.g. #site-content)
@@ -1024,6 +1210,12 @@ export class Repl {
     );
     this.setInterpretation(interpretation);
 
+    // Append conversation snippet to crawl node (don't overwrite summary for follow-ups)
+    if (this.crawlManager.currentNodeId && interpretation.summary) {
+      const snippet = `Q: ${input} → ${interpretation.summary.split(/\.\s/)[0] || ""}`;
+      this.crawlManager.appendConversationSnippet(this.crawlManager.currentNodeId, snippet);
+    }
+
     if (interpretation.summary) {
       if (interpretation.pageType === "content") {
         render.contentBox(content.title, interpretation.summary);
@@ -1068,6 +1260,26 @@ export class Repl {
       this.state.previousInterpretation = this.state.currentInterpretation;
     }
     this.state.currentInterpretation = interpretation;
+  }
+
+  /**
+   * Store the LLM's summary on the current crawl node.
+   */
+  private storeSummaryOnNode(summary: string): void {
+    if (!this.crawlManager.currentNodeId || !summary) return;
+    this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, { summary });
+  }
+
+  /**
+   * Name the crawl after first interpret() if it still has a default timestamp name.
+   */
+  private maybeNameCrawl(summary: string): void {
+    if (!this.crawlManager.activeCrawl) return;
+    // Default name is ISO timestamp: "2026-02-16 14:30:00"
+    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(this.crawlManager.activeCrawl.name)) return;
+    const rootNode = this.crawlManager.nodes.get(this.crawlManager.activeCrawl.rootId);
+    const rootUrl = rootNode?.url || "";
+    this.crawlManager.activeCrawl.name = deriveCrawlName(rootUrl, summary, this.state.goalContext.baseGoal);
   }
 
   /**
@@ -1296,7 +1508,7 @@ export class Repl {
   private clearCrawl(): void {
     if (this.crawlManager.activeCrawl) {
       try {
-        const filepath = saveCrawl(this.crawlManager);
+        const filepath = saveCrawl(this.crawlManager, this.state.log);
         render.status(`crawl auto-saved to ${filepath}`);
       } catch {
         // No active crawl or save failed — continue

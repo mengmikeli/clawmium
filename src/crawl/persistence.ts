@@ -28,7 +28,57 @@ function getCrawlDir(): string {
 // Save
 // ===================================================================
 
-export function saveCrawl(manager: CrawlManager): string {
+export interface CrawlPeek {
+  id: string;
+  name: string;
+  created: number;
+  rootUrl: string;
+  nodeCount: number;
+}
+
+/**
+ * Read just the header of a saved crawl file — fast, no full parse.
+ * Returns null on missing or corrupt files.
+ */
+export function peekCrawl(crawlId: string): CrawlPeek | null {
+  const dir = getCrawlDir();
+  const filepath = path.join(dir, `${crawlId}.md`);
+  if (!fs.existsSync(filepath)) return null;
+
+  try {
+    const content = fs.readFileSync(filepath, "utf-8");
+
+    // Parse header fields
+    const nameMatch = content.match(/^# (.+)$/m);
+    const createdMatch = content.match(/\*\*Created:\*\* (.+)$/m);
+    const rootMatch = content.match(/\*\*Root:\*\* (.+)$/m);
+    const crawlIdMatch = content.match(/\*\*Crawl ID:\*\* (.+)$/m);
+
+    if (!nameMatch || !createdMatch || !rootMatch || !crawlIdMatch) return null;
+
+    // Count node blocks (### headings in the ## Nodes section)
+    const nodesSplit = content.split("## Nodes");
+    let nodeCount = 0;
+    if (nodesSplit.length >= 2) {
+      // Count ### headings, but stop if we hit another ## section (like ## Session Log)
+      const nodesSection = nodesSplit[1].split(/^## /m)[0];
+      const nodeMatches = nodesSection.match(/^### /gm);
+      nodeCount = nodeMatches ? nodeMatches.length : 0;
+    }
+
+    return {
+      id: crawlIdMatch[1].trim(),
+      name: nameMatch[1].trim(),
+      created: new Date(createdMatch[1].trim()).getTime(),
+      rootUrl: rootMatch[1].trim(),
+      nodeCount,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveCrawl(manager: CrawlManager, sessionLog?: Array<{ role: string; content: string; timestamp: number }>): string {
   if (!manager.activeCrawl) throw new Error("No active crawl to save");
 
   const dir = getCrawlDir();
@@ -95,6 +145,27 @@ export function saveCrawl(manager: CrawlManager): string {
     lines.push("");
 
     queue.push(...node.children);
+  }
+
+  // Session log section (optional)
+  if (sessionLog && sessionLog.length > 0) {
+    // Filter entries within the crawl's lifetime
+    const startTime = crawl.created;
+    const endTime = crawl.lastAccessed;
+    const relevant = sessionLog.filter((e) => e.timestamp >= startTime && e.timestamp <= endTime);
+
+    if (relevant.length > 0) {
+      lines.push("## Session Log");
+      lines.push("");
+      for (const entry of relevant) {
+        const d = new Date(entry.timestamp);
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mm = String(d.getMinutes()).padStart(2, "0");
+        const ss = String(d.getSeconds()).padStart(2, "0");
+        lines.push(`[${hh}:${mm}:${ss}] ${entry.role}: ${entry.content}`);
+      }
+      lines.push("");
+    }
   }
 
   const filepath = path.join(dir, `${crawl.id}.md`);

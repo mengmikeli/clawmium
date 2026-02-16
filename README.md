@@ -57,7 +57,11 @@ Once running, you interact through numbered choices and free-text questions:
 | `/refresh` | Re-analyze current page |
 | `/login` | Log in to current site (CLI auth — password masked) |
 | `/save` | Save extracted data to disk |
-| `/url` | Show current URL and navigation stack |
+| `/url` | Show current URL |
+| `/stack` | Show URL stack and sync status |
+| `/tree` | Show crawl navigation tree |
+| `/crawl` | Manage crawls (list, load, rename, end, info) |
+| `/clear` | Reset state (repl, crawl, browser, all) |
 | `/demo` | Run CityServe demo |
 | `/quit` | End session |
 | `/help` | Show help |
@@ -93,6 +97,23 @@ Ctrl+C cancels the current operation; double Ctrl+C exits.
 - **Data extraction** — structured data is formatted as tables and saved to `~/clm/<site>/`.
 - **Form detection** — Search boxes and filter forms are auto-detected and offered as numbered choices. Works with `<input>` and `<textarea>` elements (e.g. Google search).
 - **HN threads** — Hacker News discussion pages get special handling: comments are extracted with threading/depth and summarized by the LLM.
+- **Crawl tree** — every page visit becomes a node in a navigation tree. `/tree` shows your path with summaries; `/crawl list` shows saved crawls; `/crawl load` resumes a previous session.
+
+## Crawl system
+
+Navigation is automatically tracked as a tree — every page you visit becomes a node with URL, title, LLM summary, and conversation snippets. Crawl names are auto-derived from the first page's summary.
+
+Saved to `~/clm/crawls/` as markdown files with tree, node details, and session log sections.
+
+**`/crawl` subcommands:**
+
+| Subcommand | Action |
+|---|---|
+| `/crawl list` | List all saved crawls |
+| `/crawl load` | Load a saved crawl and navigate to its last position |
+| `/crawl rename <name>` | Rename the active crawl |
+| `/crawl end` | Save and end the active crawl (start fresh on next navigation) |
+| `/crawl info` | Show details of the active crawl |
 
 ## LLM providers
 
@@ -143,6 +164,11 @@ src/
     hn.ts               # HN comment thread extraction
   forms/
     detector.ts         # Search/filter form detection
+  crawl/
+    tree.ts             # CrawlManager (node tree, navigation tracking)
+    persistence.ts      # Save/load/list crawls as markdown
+    context.ts          # Ancestor chain for LLM context
+    namer.ts            # Auto-name crawls from page summary
   cli/
     renderer.ts         # ANSI terminal output
     repl.ts             # Main REPL loop
@@ -157,6 +183,9 @@ cityserve/              # Mock government website
 ```bash
 npm run test:phase5    # Form detection, HN extraction, goals (91 assertions)
 npm run test:recover   # Browser crash recovery (14 tests)
+npm run test:crawl         # Crawl tree + persistence (113 assertions)
+npm run test:crawl-llm     # Crawl LLM integration (48 assertions)
+npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
 npm run test:browser   # Browser integration (needs CityServe running)
 npm run test:llm       # LLM provider test
 ```

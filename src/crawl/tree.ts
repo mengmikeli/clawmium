@@ -149,6 +149,30 @@ export class CrawlManager {
   }
 
   // ---------------------------------------------------------------
+  // Metadata helpers
+  // ---------------------------------------------------------------
+
+  setNodeMetadata(nodeId: string, metadata: Partial<{ summary: string; conversationSnippets: string[] }>): void {
+    const node = this.nodes.get(nodeId);
+    if (!node) return;
+    if (!node.metadata) node.metadata = {};
+    if (metadata.summary !== undefined) node.metadata.summary = metadata.summary;
+    if (metadata.conversationSnippets !== undefined) node.metadata.conversationSnippets = metadata.conversationSnippets;
+  }
+
+  appendConversationSnippet(nodeId: string, snippet: string, maxSnippets = 5): void {
+    const node = this.nodes.get(nodeId);
+    if (!node) return;
+    if (!node.metadata) node.metadata = {};
+    if (!node.metadata.conversationSnippets) node.metadata.conversationSnippets = [];
+    const truncated = snippet.length > 120 ? snippet.slice(0, 117) + "..." : snippet;
+    node.metadata.conversationSnippets.push(truncated);
+    if (node.metadata.conversationSnippets.length > maxSnippets) {
+      node.metadata.conversationSnippets.shift();
+    }
+  }
+
+  // ---------------------------------------------------------------
   // Tree restructuring
   // ---------------------------------------------------------------
 
@@ -206,6 +230,61 @@ export class CrawlManager {
       const indent = "  ".repeat(depth);
       const marker = nodeId === this.currentNodeId ? " <-- you are here" : "";
       lines.push(`${indent}- [${node.title}](${node.url}) \`${node.id.slice(0, 6)}\` \`${node.reachedBy}\`${marker}`);
+      for (const childId of node.children) {
+        buildTree(childId, depth + 1);
+      }
+    };
+    buildTree(this.activeCrawl.rootId, 0);
+    return lines.join("\n");
+  }
+
+  getEnrichedDisplayTree(): string {
+    if (!this.activeCrawl) return "";
+    const rootNode = this.nodes.get(this.activeCrawl.rootId);
+    if (!rootNode) return "";
+
+    const RESET = "\x1b[0m";
+    const DIM = "\x1b[2m";
+    const BOLD = "\x1b[1m";
+    const CYAN = "\x1b[36m";
+    const WHITE = "\x1b[37m";
+
+    const reachedByIcon: Record<string, string> = {
+      choice: "↗",
+      goto: "⇒",
+      back: "←",
+      forward: "→",
+      auto: "·",
+    };
+
+    const lines: string[] = [];
+    if (this.activeCrawl.name) {
+      lines.push(`  ${BOLD}${this.activeCrawl.name}${RESET}`);
+      lines.push("");
+    }
+
+    const buildTree = (nodeId: string, depth: number): void => {
+      const node = this.nodes.get(nodeId);
+      if (!node) return;
+      const indent = "  ".repeat(depth + 1);
+      const isCurrent = nodeId === this.currentNodeId;
+      const prefix = isCurrent ? `${CYAN}→${RESET}` : " ";
+      const icon = reachedByIcon[node.reachedBy] || "·";
+
+      // Title — bold if current
+      const title = isCurrent ? `${BOLD}${WHITE}${node.title}${RESET}` : node.title;
+
+      // Summary — truncated, dim
+      let summaryStr = "";
+      if (node.metadata?.summary) {
+        const truncated =
+          node.metadata.summary.length > 50
+            ? node.metadata.summary.slice(0, 47) + "..."
+            : node.metadata.summary;
+        summaryStr = ` ${DIM}— ${truncated}${RESET}`;
+      }
+
+      lines.push(`${indent}${prefix} ${icon} ${title}${summaryStr}`);
       for (const childId of node.children) {
         buildTree(childId, depth + 1);
       }
