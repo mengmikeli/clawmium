@@ -1,11 +1,11 @@
 # TODO — Clawmium
 
-> Updated: 2026-02-16 (after crawls design review — see `2026-02-16-1.md`)
+> Updated: 2026-02-16 (after form wiring + navigator error handling — see `2026-02-16-2.md`)
 
 ## High
 
 1. ~~Commit Phase 5 changes~~ — done (`ee22326`)
-2. **Wire form detection into REPL** — `detectInteractiveForms()` is built but not called from `_processCurrentPage()`; wire it in to auto-detect and append fill choices. Then test on real sites (npmjs.com, Google, GitHub).
+2. ~~Wire form detection into REPL~~ — done (`ff96989`). Includes textarea support for Google, tautological label fix, navigator error handling, and 25 new test assertions.
 3. **Crawl tree — Phase 1 (data structures + persistence)** — `CrawlNode`, `Crawl`, `CrawlManager` interfaces in `src/crawl/`. Tree operations: create, find (dedup via nodeIndex), attach, detach, ancestors, display. Markdown persistence to `~/clm/crawls/`. Fields: `parentId`, `reachedBy`. All mechanical, testable without LLM or browser. See design in `2026-02-16-1.md`.
 4. **Crawl tree — Phase 2 (REPL hooks + /tree)** — Hook `addNavigation()` into REPL navigation paths as passive observer. Every navigation creates/finds a node. Single crawl auto-created on first navigation, timestamp-named. Add `/tree` display command.
 5. **`/auto` mode spike** — wire up `planAction()` behind `/auto <goal>`. Loop: `interpret -> planAction -> execute`, human interrupts with Ctrl+C or agent hands off auth. Test on CityServe demo first. Autonomous navigation should build crawl nodes as it goes.
