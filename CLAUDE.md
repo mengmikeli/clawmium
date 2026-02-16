@@ -19,7 +19,7 @@ Works on real websites (Hacker News, blogs, news sites) and includes a CityServe
 - **LLM Integration:** User provides their own API key. Two providers:
   - **OpenAI** (via `openai` SDK) — primary, stress-tested on real sites
   - **Anthropic Claude** (via `@anthropic-ai/sdk`) — functional, less tested
-- **Config:** `.env` file for API keys and provider selection
+- **Config:** `.env` file for API keys, provider selection, and LLM token limits
 
 ## Project Structure
 
@@ -27,7 +27,7 @@ Works on real websites (Hacker News, blogs, news sites) and includes a CityServe
 clawmium/
 ├── CLAUDE.md                # This file — project spec + architecture
 ├── package.json
-├── .env.example             # API key template
+├── .env.example             # API key template + LLM token limits
 ├── .gitignore
 ├── tsconfig.json
 │
@@ -41,9 +41,9 @@ clawmium/
 │   │   └── __test__recover.ts # Automated recovery + detection tests (14 tests, no deps)
 │   ├── llm/
 │   │   ├── provider.ts      # Interfaces: LLMProvider, PageInterpretation, AgentAction, ExtractedData
-│   │   ├── openai.ts        # OpenAI provider
-│   │   ├── anthropic.ts     # Anthropic provider
-│   │   ├── prompts.ts       # System prompts (interpret, plan, extract) — content-first philosophy
+│   │   ├── openai.ts        # OpenAI provider (configurable token limits)
+│   │   ├── anthropic.ts     # Anthropic provider (configurable token limits)
+│   │   ├── prompts.ts       # System prompts (interpret, plan, extract) — content-first, page-type-aware summaries
 │   │   └── __test__.ts      # LLM integration test
 │   ├── auth/
 │   │   ├── detector.ts      # Login page detection (weighted heuristics, threshold 0.5)
@@ -53,19 +53,22 @@ clawmium/
 │   ├── forms/
 │   │   └── detector.ts      # Interactive form detection (search, filter)
 │   ├── crawl/
-│   │   ├── tree.ts          # CrawlManager — node tree, navigation tracking, enriched display
-│   │   ├── persistence.ts   # Save/load/list/peek crawls as markdown to ~/clm/crawls/
+│   │   ├── tree.ts          # CrawlManager — node tree, cursor history, navigation tracking, enriched display
+│   │   ├── persistence.ts   # Save/load/list/peek crawls as markdown to ~/clm/crawls/ (JSON sidecar fallback)
 │   │   ├── context.ts       # Ancestor chain formatting for LLM context, tree-derived breadcrumbs
 │   │   └── namer.ts         # Derive crawl names from page summary + user goal
+│   ├── session/
+│   │   └── persistence.ts   # SessionEnvelope, saveSession/loadSession/findLastSession — JSON sidecar for full session resume
 │   ├── cli/
 │   │   ├── repl.ts          # Main REPL loop — slash commands, choice selection, free-text LLM conversation
-│   │   ├── renderer.ts      # ANSI terminal output (banner, contentBox, dataTable, commentThread, choices, status lines)
+│   │   ├── renderer.ts      # ANSI terminal output (banner, contentBox, navSummary, progress, dataTable, commentThread, choices, status lines)
 │   │   └── goals.ts         # Pure functions: formatGoal(), addBreadcrumb()
 │   ├── output/
 │   │   └── writer.ts        # Save data + session logs to ~/clm/{site}/
 │   ├── __test__crawl.ts         # Crawl tree + persistence (113 assertions)
 │   ├── __test__crawl_llm.ts     # Crawl LLM integration (48 assertions)
-│   └── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
+│   ├── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
+│   └── __test__session.ts       # Session persistence — cursor, metadata, save/load round-trip (118 assertions)
 │
 ├── cityserve/               # Mock government website (CityServe)
 │   ├── server.ts            # Express server
@@ -84,6 +87,8 @@ clawmium/
     ├── 2026-02-16-1.md      # Crawls design review — GoalContext feedback loop
     ├── 2026-02-16-2.md      # Form detection wiring + navigator error handling
     ├── 2026-02-16-3.md      # Crawl Phase 4 — command layer, enriched display, session log persistence
+    ├── 2026-02-17-0.md      # Session persistence + main view polish — trail representations compound
+    ├── 2026-02-17-1.md      # Meta-learnings — five principles from the Feb 16-17 sprint
     └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
@@ -106,7 +111,7 @@ Human (terminal)  →  CLM REPL  →  LLM (interpret page, extract data)
    c. If sparse DOM content (<500 chars), try network JSON for article text, then scroll-to-load
    d. Page content sent to LLM with user's goal and conversation context
    e. LLM returns content-first interpretation: summary of what the page *says*, plus navigation choices
-   f. CLI renders summary (content box for articles, inline for navigation) then numbered choices
+   f. CLI renders summary (content box for articles, navSummary for navigation pages) then numbered choices
 3. Human selects choices, types free-text questions, or uses slash commands
 4. Free-text input gets answered as a follow-up using previous summary as conversation context
 5. Data automatically saved to `~/clm/{site}/` on extraction
@@ -117,13 +122,15 @@ The LLM prompt prioritizes content over navigation. Page types:
 
 | Type | Rendering | Choices |
 |------|-----------|---------|
-| `content` | Summary in ASCII content box | Only links to other content (no navbar chrome) |
-| `navigation` | Summary inline | Main content links as choices (max 10) |
+| `content` | Summary in ASCII content box (3-6 sentences) | Only links to other content (no navbar chrome) |
+| `navigation` | Summary in navSummary block (bold title, 1-3 sentences, dim hostname) | Main content links as choices (max 10) |
 | `login` | Auth prompt in CLI | N/A — triggers CLI auth flow |
 | `data` | Structured data table | "Show rendered page", "Save and quit" |
 | `form` | Form fields | N/A |
 
 Key prompt rules:
+- Content pages: 3-6 sentence summary with specifics (names, numbers, dates, key claims)
+- Navigation pages: 1-3 sentence description of what the listing contains and what stands out
 - Summary captures what the page *says*, not just its structure
 - Empty/sparse pages get "content is empty" — no hallucination from URL alone
 - Follow-up questions answered in context, not re-described
@@ -195,8 +202,6 @@ interface SessionState {
   history: Array<{ role; content }>;         // Conversation context for LLM
   log: Array<{ role; content; timestamp }>;  // Full session log for saving
   site: string;                              // Current site name
-  pageStack: PageSnapshot[];                 // For /back — exact state restoration
-  forwardStack: PageSnapshot[];              // For /forward — restored on /back
   loginAvailable: boolean;                   // True when login page detected
   detectedForms: DetectedForm[];             // Interactive forms found on current page
   homeUrl: string;                           // Persisted home URL, saved/restored via saveConfig()
@@ -204,14 +209,18 @@ interface SessionState {
 }
 ```
 
+**Cursor history** (replaces pageStack/forwardStack/visitHistory): The crawl tree now owns all navigation state. `CrawlManager.cursorHistory` is a linear `CursorEntry[]` log of node visits; `cursorIndex` tracks the current position for back/forward. `/back` decrements the index, `/forward` increments it, `/history N` jumps to an entry. New navigation truncates forward entries (same as browser behavior). Capped at 200 entries.
+
 Key state behaviors:
-- **REPL owns position**: `state.currentUrl` is set after every `nav.goto()`, never read from `page.url()`. All stack operations, `inferResource()`, `currentSite()`, and anchor detection use `currentUrl`.
+- **REPL owns position**: `state.currentUrl` is set after every `nav.goto()`, never read from `page.url()`. All operations, `inferResource()`, `currentSite()`, and anchor detection use `currentUrl`.
+- **Crawl node as source of truth**: `PageInterpretation` and `GoalContext` are stored on `CrawlNode.metadata` via `storeStateOnNode()`. `/back` and `/forward` restore from the node (no separate snapshot copies). URL-deduplicated nodes get their metadata overwritten on revisit — the node always has the *latest* interpretation.
 - **Goal reset**: `/goto` to external URL resets `GoalContext` — `baseGoal` becomes `"browsing {hostname}"`, `activeIntent` cleared, `breadcrumb` reset. Relative paths keep current goal context.
 - **Previous interpretation**: When LLM produces new choices, old ones preserved. If user enters a number matching old choices, asks "did you mean [N] label? (y/n)"
-- **Page stack**: Pushed before forward navigation, popped on `/back`. Restores exact interpretation, choices, goal, and page title without re-running the LLM. `/back` pushes to `forwardStack`; `/forward` pops from it.
 - **Conversation context**: Free-text follow-ups pass `"Previous summary: ...\nUser asks: ..."` to the LLM so it answers the question rather than re-describing the page.
 - **Form detection**: `detectInteractiveForms(page)` runs on each page load. Detected forms become fill choices via `appendSystemChoices()`, deduped by `inputSelector` against LLM-generated fill choices. Ordering: LLM choices → detected forms → login.
 - **Home URL persistence**: `homeUrl` saved to disk via `saveConfig()` on `/home set`, restored on startup. Used as default start URL when no explicit URL is given.
+- **Session persistence**: On shutdown and periodically (60s), a `.session.json` sidecar is written alongside the crawl markdown. Contains full `SessionEnvelope`: crawl tree with interpretations, cursor history, REPL state, conversation history. On startup, if a recent session exists (< 7 days), user is prompted to resume. `--new` flag bypasses the prompt.
+- **Auto-save**: `setInterval(autoSave, 60_000)` writes `.session.json` only (lightweight). Cleared on shutdown.
 
 Guard flags:
 - `shuttingDown` — prevents double shutdown (rl.close fires close event)
@@ -227,14 +236,17 @@ Every navigation is recorded as a node in a tree. The tree persists to markdown 
 - Each node stores: URL, title, timestamp, `reachedBy` (choice/goto/back/forward/auto), parent ID, children
 - Deduplicates by URL — navigating to an already-visited URL moves the cursor without creating a new node
 - `getDisplayTree()` returns plain text tree for markdown persistence; `getEnrichedDisplayTree()` adds ANSI colors, current-node marker (`→`), reachedBy icons, and inline summaries
+- **Cursor history**: `cursorHistory: CursorEntry[]` + `cursorIndex: number` — linear visit log with back/forward navigation. Replaces the old `pageStack`/`forwardStack`/`visitHistory` arrays on SessionState. Methods: `appendCursor()`, `cursorBack()`, `cursorForward()`, `cursorJump()`, `truncateCursorForward()`, `resetCursor()`
 
-**Node metadata**: After each `interpret()` call, the REPL populates the current node's `metadata.summary` (LLM summary) and `metadata.conversationSnippets` (follow-up Q&A). This data appears in the enriched tree display and saved crawl files.
+**Node metadata**: After each `interpret()` call, `storeStateOnNode()` populates the current node's `metadata.summary`, `metadata.interpretation` (full `PageInterpretation`), `metadata.goalContext`, and `metadata.conversationSnippets`. Interpretation and goal context enable full state restoration on `/back`, `/forward`, `/history`, and session resume.
 
 **Ancestor context** (`src/crawl/context.ts`): `formatAncestorContext()` builds a "Navigation path" string from the current node's ancestors (up to 3 levels). Fed into LLM interpret calls so the model knows where the user has been.
 
 **Naming** (`src/crawl/namer.ts`): `deriveCrawlName()` auto-names crawls from the first page summary via a priority chain: user-set goal → first clause of LLM summary → hostname + date. No extra LLM call.
 
-**Persistence** (`src/crawl/persistence.ts`): Crawls saved as markdown at `~/clm/crawls/{id}.md`. Format has three sections: `## Tree` (ASCII tree), `## Nodes` (one `### heading` per node with URL/timestamp/summary), `## Session Log` (timestamped log entries filtered to crawl's time range). `peekCrawl()` reads header-only for listing without full parse. `loadCrawl()` fully restores a CrawlManager from markdown.
+**Persistence** (`src/crawl/persistence.ts`): Crawls saved as markdown at `~/clm/crawls/{id}.md`. Format has three sections: `## Tree` (ASCII tree), `## Nodes` (one `### heading` per node with URL/timestamp/summary), `## Session Log` (timestamped log entries filtered to crawl's time range). `peekCrawl()` reads header-only for listing without full parse. `loadCrawl()` tries `.session.json` first (full restore with interpretations, cursor, goal context), falls back to `.md` (tree-only).
+
+**Session persistence** (`src/session/persistence.ts`): `SessionEnvelope` captures the full session state as JSON. Saved as `{crawl-id}.session.json` alongside the markdown file. Contains serialized crawl tree (with interpretations and goal context on each node), cursor history, REPL state (URL, site, goal, conversation history), and session log. `findLastSession()` scans for the most recent sidecar within a configurable age window.
 
 **`pendingReachedBy` pattern**: The REPL sets `state.pendingReachedBy` before navigation (e.g., "choice", "goto"). `trackNavigation()` consumes it after the page loads to record how the user reached the new page. This decouples navigation intent from navigation execution.
 
@@ -253,7 +265,14 @@ Configured via `.env`:
 LLM_PROVIDER=openai  # or "anthropic"
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
+
+# LLM token limits (optional — defaults shown)
+MAX_TOKENS_INTERPRET=2048
+MAX_TOKENS_PLAN=512
+MAX_TOKENS_EXTRACT=1024
 ```
+
+Token limits are configurable per method via environment variables. Both providers read from `process.env` at call time via a shared `tokenLimit(envVar, fallback)` helper. The `interpret` default was raised from 1024 to 2048 to allow richer summaries; `plan` and `extract` keep their original defaults.
 
 ## CLI Commands
 
@@ -267,7 +286,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 | `/home [url]` | Go to home URL, or set home URL if argument given |
 | `/refresh` | Re-navigate to current URL and re-interpret |
 | `/url` | Show current URL (one line, copy-pasteable) |
-| `/stack` | Debug: show REPL URL vs browser URL, sync status, back/forward stacks |
+| `/stack` | Show navigation stack with titles, sync status, back/forward |
+| `/history [N]` | Show visit history (with N: jump to entry N) |
 | `/save` | Save extracted data + session log to disk |
 | `/tree` | Show crawl navigation tree (enriched: summaries, icons, current marker) |
 | `/crawl` | Manage crawls: list, load, rename, end, info |
@@ -282,6 +302,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ### Terminal Output Style
 
 ```
+⋯  overwriting progress line (dim gray, single-line, \r-based)
 →  status/progress messages (dim gray)
 ✓  completed actions (green)
 ⚠  warnings (yellow)
@@ -290,8 +311,13 @@ ANTHROPIC_API_KEY=sk-ant-...
   [1] Choice one              (cyan number, white text)
   [2] Choice two
 
-  tip: /show to open browser, /back to go back    (dim hints when no choices)
+  tip: /show to open browser    (dim hints, context-aware, max 3)
 
+  Bold Title                         (navigation page: navSummary)
+  White summary text, word-wrapped   (no border, 72-char wrap)
+  hostname.com                       (dim hostname)
+
+  Bold Title                         (content page: contentBox)
   ┌──────────────────────────────────────┐
   │ Content box for article text         │    (word-wrapped, white on bordered box)
   └──────────────────────────────────────┘
@@ -302,6 +328,12 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 >  user input prompt (cyan)
 ```
+
+**Progress line behavior**: During page load, intermediate steps (loading, extracting, analyzing) are shown as a single overwriting `⋯` line via `render.progress()`. When the LLM returns, `render.progressDone()` clears the line before rendering content. This replaces the old cascade of 3-4 stacked `render.status()` calls.
+
+**Navigation vs content rendering**: Content pages get a bordered `contentBox()`. Navigation pages (listings, homepages) get `navSummary()` — bold title, word-wrapped white summary, dim hostname. Both are clearly visible; the old approach rendered navigation summaries as dim `render.status()` lines indistinguishable from progress messages.
+
+**Context-aware hints**: `suggestCommands()` checks cursor position (no `/back` at start), `loginAvailable`, `detectedForms`, and `lastExtracted` before suggesting commands. Capped at 3 hints.
 
 ## Running
 
@@ -321,6 +353,9 @@ npm run clm
 npm run clm -- browse nytimes.com
 npm run clm -- browse https://example.com/page
 
+# Skip session resume prompt
+npm run clm -- --new
+
 # CityServe demo (separate terminal)
 npm run cityserve          # Start mock site on :3000
 npm run clm                # Then type /demo in the REPL
@@ -333,6 +368,7 @@ npm run test:recover       # Browser crash recovery (14 tests)
 npm run test:crawl         # Crawl tree + persistence (113 assertions)
 npm run test:crawl-llm     # Crawl LLM integration (48 assertions)
 npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
+npm run test:session       # Session persistence — cursor, metadata, save/load (118 assertions)
 ```
 
 ## File Output
@@ -341,8 +377,10 @@ Saved to `~/clm/{site}/{resource}-{date}.json`:
 
 ```
 ~/clm/
+  config.json                  # homeUrl + lastSessionId
   crawls/
-    {crawl-id}.md             # Saved crawl tree + session log
+    {crawl-id}.md              # Saved crawl tree + session log (human-readable)
+    {crawl-id}.session.json    # Full session state (machine-readable, for resume)
   hackernews/
     session-log-2026-02-13.md
   nytimes/
@@ -375,8 +413,7 @@ Every async operation has a fallback chain:
 - No stealth mode (no `playwright-extra` / puppeteer-stealth)
 - HN comment threads rendered as content with `commentThread()` display — top 30 comments extracted, LLM summarizes discussion themes
 - Anthropic provider less tested than OpenAI
-- `max_tokens` fixed at 1024 — long articles may get truncated summaries
-- No session persistence / resume across runs (crawl trees persist, but REPL state does not)
+- `max_tokens` defaults to 2048 for interpret (was 1024) — configurable via `MAX_TOKENS_INTERPRET` in `.env`
 - No OAuth/SSO/2FA flows
 - Google and other sites may trigger CAPTCHA in headless mode
 
@@ -399,3 +436,6 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **`/url` split (2026-02-16)** — `/url` simplified to print just the current URL. Old debug view (browser URL, sync status, back/forward stacks) moved to new `/stack` command.
 - **`CLAUD.md` renamed to `CLAUDE.md` (2026-02-16)** — The original filename was a typo carried since day one. Earlier learnings files reference `CLAUD.md` — that was the correct name at the time; this is the same file.
 - **Crawl system (2026-02-16)** — Four-phase implementation: Phase 1 (tree data structure + markdown persistence), Phase 2 (REPL wiring across all 10 navigation paths), Phase 3 (LLM integration — auto-naming, ancestor context, tree-derived breadcrumbs), Phase 4 (command layer: `/crawl list|load|rename|end|info`, enriched `/tree` display, session log persistence). 4 new files in `src/crawl/`, 3 test suites, 192 total assertions. See `learnings/2026-02-16-3.md`. Version bumped to 0.2.0.
+- **`/history` command + `/stack` polish (2026-02-16)** — Flat `VisitEntry[]` on SessionState records every page transition (no dedup). `/history` displays chronological list enriched with crawl tree summaries and reachedBy icons. `/history N` jumps to an entry (pushes current to back stack, restores snapshot). `/stack` upgraded from raw `console.log` to polished ANSI display with titles, sync status, and structured back/forward stacks. `ReachedBy` extended with `"history"` + `⏎` icon. Capped at 200 entries.
+- **Session persistence — crawl node as source of truth (2026-02-16)** — Six-phase refactor: (1) Enriched `CrawlNode.metadata` with `interpretation` and `goalContext`. (2) Added `cursorHistory[]` + `cursorIndex` to CrawlManager, replacing `pageStack`/`forwardStack`/`visitHistory` on SessionState. (3) Rewrote `/back`, `/forward`, `/history`, `/stack` to use cursor; `restoreFromNode()` replaces `restoreSnapshot()`. (4) New `src/session/persistence.ts` — `SessionEnvelope` JSON sidecar written alongside crawl markdown, enabling full session round-trip. `loadCrawl()` prefers JSON over markdown. (5) Auto-resume on startup: finds last session < 7 days, prompts to resume. `--new` flag bypasses. (6) Periodic auto-save (60s). New test suite: `__test__session.ts` with 118 assertions.
+- **Main view polish + configurable max_tokens (2026-02-17)** — Three problems fixed: (1) Noisy cascade of dim status lines during page load replaced with single overwriting `render.progress()` line + `render.progressDone()`. (2) Navigation page summaries (previously dim `render.status()`, invisible) now use `render.navSummary()` — bold title, word-wrapped white text, dim hostname. (3) `max_tokens` for interpret raised from 1024→2048 default, all three LLM methods (`interpret`/`planAction`/`extractData`) configurable via `MAX_TOKENS_INTERPRET`/`MAX_TOKENS_PLAN`/`MAX_TOKENS_EXTRACT` env vars. Both providers use shared `tokenLimit()` helper. Prompt updated: content pages get 3-6 sentence summaries, navigation 1-3 sentences. `suggestCommands()` now context-aware (checks cursor position, login, forms, extracted data). 6 files changed, 0 test regressions (401 assertions across 5 suites).
