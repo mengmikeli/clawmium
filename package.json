@@ -11,6 +11,7 @@
     "test:recover": "tsx src/browser/__test__recover.ts",
     "test:phase5": "tsx src/__test__phase5.ts",
     "test:llm": "tsx src/llm/__test__.ts",
+    "test:crawl": "tsx src/__test__crawl.ts",
     "clm": "tsx src/index.ts"
   },
   "keywords": [],

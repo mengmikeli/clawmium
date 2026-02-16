@@ -91,6 +91,8 @@ Ctrl+C cancels the current operation; double Ctrl+C exits.
 - **CLI auth** — login forms are detected automatically and offered as a choice. Credentials are entered in the terminal with masked passwords, never in a browser popup.
 - **Page stack** — `/back` and `/forward` restore exact page state (summary + choices) without re-fetching.
 - **Data extraction** — structured data is formatted as tables and saved to `~/clm/<site>/`.
+- **Form detection** — Search boxes and filter forms are auto-detected and offered as numbered choices. Works with `<input>` and `<textarea>` elements (e.g. Google search).
+- **HN threads** — Hacker News discussion pages get special handling: comments are extracted with threading/depth and summarized by the LLM.
 
 ## LLM providers
 
@@ -137,12 +139,26 @@ src/
     prompts.ts          # System prompts (interpret, plan, extract)
     openai.ts           # OpenAI provider (GPT-4o)
     anthropic.ts        # Anthropic provider (Claude)
+  sites/
+    hn.ts               # HN comment thread extraction
+  forms/
+    detector.ts         # Search/filter form detection
   cli/
     renderer.ts         # ANSI terminal output
     repl.ts             # Main REPL loop
+    goals.ts            # Goal context (breadcrumb tracking)
   output/
     writer.ts           # Save data/session logs to ~/clm/
 cityserve/              # Mock government website
+```
+
+## Tests
+
+```bash
+npm run test:phase5    # Form detection, HN extraction, goals (91 assertions)
+npm run test:recover   # Browser crash recovery (14 tests)
+npm run test:browser   # Browser integration (needs CityServe running)
+npm run test:llm       # LLM provider test
 ```
 
 ## License

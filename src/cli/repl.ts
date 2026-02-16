@@ -10,6 +10,8 @@ import { isHNItemPage, extractHNComments, formatHNPageForLLM } from "../sites/hn
 import { formatGoal, addBreadcrumb } from "./goals";
 import * as render from "./renderer";
 import { saveData, saveSessionLog, loadConfig, saveConfig } from "../output/writer";
+import { CrawlManager, ReachedBy } from "../crawl/tree";
+import { saveCrawl } from "../crawl/persistence";
 
 const LLM_TIMEOUT = 30_000; // 30s timeout for LLM calls
 
@@ -39,6 +41,7 @@ interface SessionState {
   detectedForms: DetectedForm[];
   homeUrl: string;
   currentUrl: string;  // REPL stack's current page URL — source of truth
+  pendingReachedBy: ReachedBy;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string, signal?: AbortSignal): Promise<T> {
@@ -74,6 +77,7 @@ export class Repl {
   private closingForAuth = false;
   private shuttingDown = false;
   private abortController: AbortController | null = null;
+  private crawlManager = new CrawlManager();
 
   constructor(engine: BrowserEngine, llm: LLMProvider, userGoal: string, site: string) {
     this.engine = engine;
@@ -95,6 +99,7 @@ export class Repl {
       detectedForms: [],
       homeUrl: config.homeUrl || "",
       currentUrl: "",
+      pendingReachedBy: "auto",
     };
   }
 
@@ -130,6 +135,7 @@ export class Repl {
       render.status(`navigating to ${startUrl}...`);
       await this.nav.goto(startUrl);
       this.state.currentUrl = startUrl;
+      this.state.pendingReachedBy = "auto";
 
       // Process the first page
       await this.processCurrentPage();
@@ -222,6 +228,11 @@ export class Repl {
     addBreadcrumb(this.state.goalContext, label);
   }
 
+  private trackNavigation(url: string, title: string, reachedBy: ReachedBy): void {
+    if (!url || url === "about:blank") return;
+    this.crawlManager.addNavigation(url, title, reachedBy);
+  }
+
   /**
    * Sync browser to match REPL's current position (currentUrl).
    * Called before any operation that needs the browser.
@@ -301,6 +312,7 @@ export class Repl {
       this.logAgent(`Login successful — redirected to ${authResult.redirectedTo}`);
       this.state.loginAvailable = false;
       this.state.currentUrl = authResult.redirectedTo;
+      this.state.pendingReachedBy = "auto";
       this.startReadline();
       await this.processCurrentPage();
       this.rl.prompt();
@@ -346,6 +358,8 @@ export class Repl {
       const hnItem = await extractHNComments(page);
       if (hnItem) {
         this.state.lastPageTitle = hnItem.title;
+        this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
+        this.state.pendingReachedBy = "auto";
         render.status(`page loaded: "${hnItem.title}"`);
         this.logAgent(`HN discussion: "${hnItem.title}" (${hnItem.commentCount} comments)`);
 
@@ -394,6 +408,8 @@ export class Repl {
     // Extract page content
     const content = await this.nav.extractContent();
     this.state.lastPageTitle = content.title;
+    this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
+    this.state.pendingReachedBy = "auto";
     render.status(`page loaded: "${content.title}"`);
     this.logAgent(`Page loaded: "${content.title}" at ${content.url}`);
 
@@ -557,6 +573,7 @@ export class Repl {
           }
           // Reset goal and base URL when navigating to an external site
           if (isExternal) {
+            this.clearCrawl();  // auto-save current crawl + start fresh for new domain
             this.state.goalContext = { baseGoal: `browsing ${new URL(url).hostname}`, activeIntent: "", breadcrumb: [] };
             const origin = new URL(url).origin;
             this.engine.setBaseUrl(origin);
@@ -566,6 +583,7 @@ export class Repl {
           await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
+          this.state.pendingReachedBy = "goto";
           try {
             await this.nav.goto(url);
           } catch (err) {
@@ -589,6 +607,7 @@ export class Repl {
             this.state.pageStack.pop();
             if (current) this.state.forwardStack.push(current);
             this.restoreSnapshot(backTarget);
+            this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, "back");
             render.hint(["/refresh to update content"]);
           } else {
             render.warn("no history to go back to");
@@ -606,6 +625,7 @@ export class Repl {
             this.state.forwardStack.pop();
             if (current) this.state.pageStack.push(current);
             this.restoreSnapshot(fwdTarget);
+            this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, "forward");
             render.hint(["/refresh to update content"]);
           } else {
             render.warn("no forward history");
@@ -663,6 +683,7 @@ export class Repl {
             await this.syncBrowser();
             this.pushPageState();
             this.interceptor.clear();
+            this.state.pendingReachedBy = "goto";
             this.state.goalContext = { baseGoal: `browsing ${new URL(this.state.homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
             try {
               await this.nav.goto(this.state.homeUrl);
@@ -697,6 +718,7 @@ export class Repl {
           await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
+          this.state.pendingReachedBy = "goto";
           this.state.goalContext = { baseGoal: `browsing ${new URL(homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
           try {
             await this.nav.goto(homeUrl);
@@ -742,6 +764,7 @@ export class Repl {
           await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
+          this.state.pendingReachedBy = "goto";
           try {
             await this.nav.goto(demoUrl);
           } catch (err) {
@@ -757,6 +780,65 @@ export class Repl {
           return;
         }
 
+        case "tree": {
+          const tree = this.crawlManager.getDisplayTree();
+          if (!tree) {
+            render.status("no crawl tree yet — navigate to start recording");
+          } else {
+            console.log();
+            console.log(tree);
+            console.log();
+          }
+          this.logCommand("/tree");
+          this.rl.prompt();
+          return;
+        }
+
+        case "clear": {
+          const scope = arg.toLowerCase() || "all";
+          const validScopes = ["repl", "crawl", "browser", "all"];
+          if (!validScopes.includes(scope)) {
+            render.error(`unknown scope: ${scope} (use repl, crawl, browser, or all)`);
+            this.rl.prompt();
+            return;
+          }
+
+          // Build summary of what will be cleared
+          const items: string[] = [];
+          if (scope === "repl" || scope === "all") {
+            items.push("REPL stacks, interpretations, history, log, goal");
+          }
+          if (scope === "crawl" || scope === "all") {
+            items.push("crawl tree" + (this.crawlManager.activeCrawl ? " (will auto-save first)" : ""));
+          }
+          if (scope === "browser" || scope === "all") {
+            items.push("browser cookies, localStorage, sessionStorage");
+          }
+
+          render.clearSummary(items);
+          const confirmed = await this.confirmAction("proceed?");
+          if (!confirmed) {
+            render.status("cancelled");
+            this.rl.prompt();
+            return;
+          }
+
+          if (scope === "repl" || scope === "all") {
+            this.clearRepl();
+          }
+          if (scope === "crawl" || scope === "all") {
+            this.clearCrawl();
+          }
+          if (scope === "browser" || scope === "all") {
+            await this.clearBrowser();
+          }
+
+          render.success(`cleared: ${scope}`);
+          this.logCommand(`/clear ${scope}`);
+          this.rl.prompt();
+          return;
+        }
+
         default:
           render.error(`unknown command: /${cmd}`);
           render.help();
@@ -766,7 +848,7 @@ export class Repl {
     }
 
     // Command-like input detection — prompt if user typed a bare command name
-    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url"];
+    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "tree", "clear"];
     const lowerInput = input.toLowerCase();
     if (knownCommands.includes(lowerInput) || knownCommands.some(c => lowerInput.startsWith(c + " "))) {
       const confirmed = await this.confirmAction(`did you mean /${lowerInput}?`);
@@ -843,6 +925,7 @@ export class Repl {
           try { this.state.currentUrl = this.nav.currentUrl(); } catch {}
           this.state.goalContext.activeIntent = trimmedQuery;
           this.addBreadcrumb(`search: ${trimmedQuery}`);
+          this.state.pendingReachedBy = "choice";
           await this.processCurrentPage();
           this.rl.prompt();
           return;
@@ -886,6 +969,7 @@ export class Repl {
         await this.engine.getPage().waitForTimeout(500);
         // Update currentUrl to wherever the browser ended up
         try { this.state.currentUrl = this.nav.currentUrl(); } catch { /* dead page */ }
+        this.state.pendingReachedBy = "choice";
         await this.processCurrentPage();
         this.rl.prompt();
         return;
@@ -1182,6 +1266,42 @@ export class Repl {
     }
     const logpath = saveSessionLog(this.state.site, this.state.log);
     render.success(`session log saved to ${logpath}`);
+  }
+
+  // ---------------------------------------------------------------
+  // /clear helpers
+  // ---------------------------------------------------------------
+
+  private clearRepl(): void {
+    this.state.pageStack = [];
+    this.state.forwardStack = [];
+    this.state.currentInterpretation = null;
+    this.state.previousInterpretation = null;
+    this.state.lastExtracted = null;
+    this.state.history = [];
+    this.state.log = [];
+    this.state.goalContext = { baseGoal: "", activeIntent: "", breadcrumb: [] };
+    this.state.lastPageTitle = "";
+    this.state.detectedForms = [];
+    this.state.loginAvailable = false;
+    // Keep: currentUrl, site, homeUrl, pendingReachedBy
+  }
+
+  private clearCrawl(): void {
+    if (this.crawlManager.activeCrawl) {
+      try {
+        const filepath = saveCrawl(this.crawlManager);
+        render.status(`crawl auto-saved to ${filepath}`);
+      } catch {
+        // No active crawl or save failed — continue
+      }
+    }
+    this.crawlManager.clear();
+  }
+
+  private async clearBrowser(): Promise<void> {
+    await this.syncBrowser();
+    await this.engine.clearBrowserData();
   }
 
   private async shutdown(): Promise<void> {

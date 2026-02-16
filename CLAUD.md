@@ -72,6 +72,9 @@ clawmium/
     ├── 2026-02-14-0.md      # REPL stack refactor — who owns the current URL?
     ├── 2026-02-14-1.md      # Rewriting CLAUD.md from design spec to implementation reference
     ├── 2026-02-15-0.md      # Phase 5: HN comments, forms, goals, reflection ritual
+    ├── 2026-02-16-0.md      # Architecture alignment — eight design decisions
+    ├── 2026-02-16-1.md      # Crawls design review — GoalContext feedback loop
+    ├── 2026-02-16-2.md      # Form detection wiring + navigator error handling
     └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
@@ -167,8 +170,14 @@ Navigation uses a fallback chain:
 ### State Management
 
 ```typescript
+interface GoalContext {
+  baseGoal: string;      // "browsing HN", "check my water bill"
+  activeIntent: string;  // "looking for AI articles"
+  breadcrumb: string[];  // last 3 nav steps: ["HN front page", "AI article title"]
+}
+
 interface SessionState {
-  userGoal: string;                          // Reset on external navigation
+  goalContext: GoalContext;                   // Replaces flat userGoal string
   currentUrl: string;                        // REPL's canonical position — source of truth
   currentInterpretation: PageInterpretation; // Current page's LLM output
   previousInterpretation: PageInterpretation; // For stale choice "did you mean?"
@@ -179,15 +188,20 @@ interface SessionState {
   site: string;                              // Current site name
   pageStack: PageSnapshot[];                 // For /back — exact state restoration
   forwardStack: PageSnapshot[];              // For /forward — restored on /back
+  loginAvailable: boolean;                   // True when login page detected
+  detectedForms: DetectedForm[];             // Interactive forms found on current page
+  homeUrl: string;                           // Persisted home URL, saved/restored via saveConfig()
 }
 ```
 
 Key state behaviors:
 - **REPL owns position**: `state.currentUrl` is set after every `nav.goto()`, never read from `page.url()`. All stack operations, `inferResource()`, `currentSite()`, and anchor detection use `currentUrl`.
-- **Goal reset**: `/goto` to external URL resets goal to `"browsing {hostname}"`. Relative paths keep current goal.
+- **Goal reset**: `/goto` to external URL resets `GoalContext` — `baseGoal` becomes `"browsing {hostname}"`, `activeIntent` cleared, `breadcrumb` reset. Relative paths keep current goal context.
 - **Previous interpretation**: When LLM produces new choices, old ones preserved. If user enters a number matching old choices, asks "did you mean [N] label? (y/n)"
 - **Page stack**: Pushed before forward navigation, popped on `/back`. Restores exact interpretation, choices, goal, and page title without re-running the LLM. `/back` pushes to `forwardStack`; `/forward` pops from it.
 - **Conversation context**: Free-text follow-ups pass `"Previous summary: ...\nUser asks: ..."` to the LLM so it answers the question rather than re-describing the page.
+- **Form detection**: `detectInteractiveForms(page)` runs on each page load. Detected forms become fill choices via `appendSystemChoices()`, deduped by `inputSelector` against LLM-generated fill choices. Ordering: LLM choices → detected forms → login.
+- **Home URL persistence**: `homeUrl` saved to disk via `saveConfig()` on `/home set`, restored on startup. Used as default start URL when no explicit URL is given.
 
 Guard flags:
 - `shuttingDown` — prevents double shutdown (rl.close fires close event)
@@ -280,6 +294,8 @@ npm run clm                # Then type /demo in the REPL
 # Tests
 npm run test:browser       # Browser integration (needs CityServe running)
 npm run test:llm           # LLM provider test
+npm run test:phase5        # Form detection, HN, goals, appendSystemChoices (91 assertions)
+npm run test:recover       # Browser crash recovery (14 tests)
 ```
 
 ## File Output
@@ -307,6 +323,7 @@ Every async operation has a fallback chain:
 | Component | Ideal | Fallback 1 | Fallback 2 |
 |-----------|-------|------------|------------|
 | Page load | `networkidle` (15s) | `domcontentloaded` (15s) | Continue with whatever loaded |
+| Navigation errors | Network (`net::` / `NS_ERROR_`) → "could not reach" message | HTTP status ≥ 400 → "returned HTTP {status}" message | All 4 REPL nav paths (`/goto`, `/home`, `/home set`, `/demo`) catch and display |
 | Content extraction | Intercepted network JSON | Scroll-to-load + re-extract DOM | Sparse content warning |
 | Browser state | `syncBrowser()` 3-point check (alive? responsive? correct URL?) | `recoverBrowser()` — relaunch headless | Error message to user |
 | Click navigation | `page.click(selector)` | Get `href` and `nav.goto()` | Detect anchor link, skip |
@@ -322,7 +339,7 @@ Every async operation has a fallback chain:
 - `max_tokens` fixed at 1024 — long articles may get truncated summaries
 - No session persistence / resume across runs
 - No OAuth/SSO/2FA flows
-- Goals now carry via `GoalContext` (breadcrumb + activeIntent), but still reset on external `/goto`
+- Google and other sites may trigger CAPTCHA in headless mode
 
 ## Design History
 
@@ -338,3 +355,5 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **`commands.ts` removed** — all command handling lives inline in `repl.ts`
 - **Phase 5: HN, forms, goals (2026-02-15)** — HN comment thread extraction + rendering, interactive form detection (search/filter with `fillPlan`), `GoalContext` replaces flat `userGoal` string (baseGoal + activeIntent + breadcrumb trail). New files: `src/sites/hn.ts`, `src/forms/detector.ts`, `src/cli/goals.ts`. See `learnings/2026-02-15-0.md`.
 - **Daily reflection ritual (2026-02-15)** — `/reflect` end-of-day and `/standup` start-of-day workflows via Claude Code skill. Persistent TODO at `learnings/TODO.md`.
+- **Architecture alignment (2026-02-16)** — Eight design decisions: layered audience, intelligence inside, `/auto` spike, generic-core site extractors, CLI+MCP interfaces, LLM agnosticism. See `learnings/2026-02-16-0.md` and `2026-02-16-1.md`.
+- **Form detection wiring + textarea fix (2026-02-16)** — `detectInteractiveForms()` wired into REPL, `appendSystemChoices()` dedup, `<textarea>` support for Google search, navigator error surfacing (`net::`/HTTP status). See `learnings/2026-02-16-2.md`.

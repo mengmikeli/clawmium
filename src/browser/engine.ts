@@ -155,6 +155,20 @@ export class BrowserEngine {
   }
 
   /**
+   * Clear cookies, localStorage, and sessionStorage.
+   */
+  async clearBrowserData(): Promise<void> {
+    if (!this.context || !this.page) return;
+    await this.context.clearCookies();
+    try {
+      await this.page.evaluate(() => {
+        try { localStorage.clear(); } catch {}
+        try { sessionStorage.clear(); } catch {}
+      });
+    } catch { /* about:blank or unresponsive — skip */ }
+  }
+
+  /**
    * Recover from a crashed browser by relaunching headless.
    * Launches to about:blank — caller navigates to the correct URL.
    */

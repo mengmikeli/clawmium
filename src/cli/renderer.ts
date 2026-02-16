@@ -93,6 +93,8 @@ export function help(): void {
   console.log(`  ${CYAN}/login${RESET}         Log in to current site`);
   console.log(`  ${CYAN}/save${RESET}          Save data to disk`);
   console.log(`  ${CYAN}/url${RESET}           Show current URL and stack`);
+  console.log(`  ${CYAN}/tree${RESET}          Show crawl navigation tree`);
+  console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
   console.log(`  ${CYAN}/demo${RESET}          Run CityServe demo`);
   console.log(`  ${CYAN}/quit${RESET}          End session`);
   console.log(`  ${CYAN}/help${RESET}          Show this help`);
@@ -185,4 +187,13 @@ export function promptString(): string {
 
 export function prompt(): void {
   process.stdout.write(promptString());
+}
+
+export function clearSummary(items: string[]): void {
+  console.log();
+  console.log(`  ${BOLD}Will be cleared:${RESET}`);
+  for (const item of items) {
+    console.log(`  ${YELLOW}•${RESET} ${item}`);
+  }
+  console.log();
 }
