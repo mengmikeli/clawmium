@@ -25,7 +25,7 @@ Works on real websites (Hacker News, blogs, news sites) and includes a CityServe
 
 ```
 clawmium/
-├── CLAUD.md                 # This file — project spec + architecture
+├── CLAUDE.md                # This file — project spec + architecture
 ├── package.json
 ├── .env.example             # API key template
 ├── .gitignore
@@ -236,7 +236,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 | `/forward` | Restore next page from forward stack |
 | `/home [url]` | Go to home URL, or set home URL if argument given |
 | `/refresh` | Re-navigate to current URL and re-interpret |
-| `/url` | Debug: show REPL URL vs browser URL with sync indicator |
+| `/url` | Show current URL (one line, copy-pasteable) |
+| `/stack` | Debug: show REPL URL vs browser URL, sync status, back/forward stacks |
 | `/save` | Save extracted data + session log to disk |
 | `/demo` | Run CityServe demo (localhost:3000, goal: "check my water bill") |
 | `/quit` | Save and exit |
@@ -357,3 +358,4 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **Daily reflection ritual (2026-02-15)** — `/reflect` end-of-day and `/standup` start-of-day workflows via Claude Code skill. Persistent TODO at `learnings/TODO.md`.
 - **Architecture alignment (2026-02-16)** — Eight design decisions: layered audience, intelligence inside, `/auto` spike, generic-core site extractors, CLI+MCP interfaces, LLM agnosticism. See `learnings/2026-02-16-0.md` and `2026-02-16-1.md`.
 - **Form detection wiring + textarea fix (2026-02-16)** — `detectInteractiveForms()` wired into REPL, `appendSystemChoices()` dedup, `<textarea>` support for Google search, navigator error surfacing (`net::`/HTTP status). See `learnings/2026-02-16-2.md`.
+- **`/url` split (2026-02-16)** — `/url` simplified to print just the current URL. Old debug view (browser URL, sync status, back/forward stacks) moved to new `/stack` command.
