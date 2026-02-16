@@ -16,15 +16,29 @@ export class PageNavigator {
   constructor(private page: Page) {}
 
   async goto(url: string): Promise<void> {
+    let response: Awaited<ReturnType<Page["goto"]>>;
     try {
-      await this.page.goto(url, { waitUntil: "networkidle", timeout: 15_000 });
-    } catch {
+      response = await this.page.goto(url, { waitUntil: "networkidle", timeout: 15_000 });
+    } catch (err) {
+      if (/net::|NS_ERROR_/i.test((err as Error).message)) {
+        throw new Error(`could not reach ${url} — site may be down or URL may be wrong`);
+      }
       // networkidle can hang on complex sites — fall back to domcontentloaded
       try {
-        await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 });
-      } catch {
+        response = await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      } catch (err2) {
+        if (/net::|NS_ERROR_/i.test((err2 as Error).message)) {
+          throw new Error(`could not reach ${url} — site may be down or URL may be wrong`);
+        }
         // Page may have already navigated; continue with whatever loaded
+        return;
       }
+    }
+
+    // Check HTTP status — surface 4xx/5xx errors
+    const status = response?.status() ?? 0;
+    if (status >= 400) {
+      throw new Error(`${url} returned HTTP ${status}`);
     }
   }
 

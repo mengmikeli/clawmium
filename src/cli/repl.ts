@@ -3,6 +3,7 @@ import { BrowserEngine } from "../browser/engine";
 import { PageNavigator, PageContent } from "../browser/navigator";
 import { NetworkInterceptor } from "../browser/network";
 import { detectLoginPage } from "../auth/detector";
+import { DetectedForm, detectInteractiveForms } from "../forms/detector";
 import { performCLIAuth } from "../auth/handoff";
 import { LLMProvider, PageInterpretation, ConversationContext, ExtractedData, GoalContext } from "../llm/provider";
 import { isHNItemPage, extractHNComments, formatHNPageForLLM } from "../sites/hn";
@@ -35,6 +36,7 @@ interface SessionState {
   pageStack: PageSnapshot[];
   forwardStack: PageSnapshot[];
   loginAvailable: boolean;
+  detectedForms: DetectedForm[];
   homeUrl: string;
   currentUrl: string;  // REPL stack's current page URL — source of truth
 }
@@ -90,6 +92,7 @@ export class Repl {
       pageStack: [],
       forwardStack: [],
       loginAvailable: false,
+      detectedForms: [],
       homeUrl: config.homeUrl || "",
       currentUrl: "",
     };
@@ -335,6 +338,9 @@ export class Repl {
       this.logAgent("Login page detected — available as optional choice");
     }
 
+    // Detect interactive forms (search, filter) — present as system choices
+    this.state.detectedForms = await detectInteractiveForms(page);
+
     // HN item page — special handling for comment threads
     if (isHNItemPage(this.state.currentUrl)) {
       const hnItem = await extractHNComments(page);
@@ -464,6 +470,25 @@ export class Repl {
    * Append system-managed choices (forms, login) to an interpretation.
    */
   private appendSystemChoices(interpretation: PageInterpretation): void {
+    // Append detected form choices (search, filter)
+    for (const form of this.state.detectedForms) {
+      // Skip if LLM already generated a fill choice with the same selector
+      const alreadyPresent = interpretation.choices.some(
+        c => c.action === "fill" && c.fillPlan?.inputSelector === form.selector
+      );
+      if (alreadyPresent) continue;
+
+      interpretation.choices.push({
+        index: interpretation.choices.length + 1,
+        label: form.label,
+        action: "fill",
+        fillPlan: {
+          inputSelector: form.selector,
+          submitAction: "enter",
+        },
+      });
+    }
+
     // Append login choice if login form was detected
     if (this.state.loginAvailable) {
       interpretation.choices.push({
@@ -541,7 +566,13 @@ export class Repl {
           await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
-          await this.nav.goto(url);
+          try {
+            await this.nav.goto(url);
+          } catch (err) {
+            render.error((err as Error).message);
+            this.rl.prompt();
+            return;
+          }
           this.state.currentUrl = url;
           await this.engine.getPage().waitForTimeout(500);
           await this.processCurrentPage();
@@ -633,7 +664,13 @@ export class Repl {
             this.pushPageState();
             this.interceptor.clear();
             this.state.goalContext = { baseGoal: `browsing ${new URL(this.state.homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
-            await this.nav.goto(this.state.homeUrl);
+            try {
+              await this.nav.goto(this.state.homeUrl);
+            } catch (err) {
+              render.error((err as Error).message);
+              this.rl.prompt();
+              return;
+            }
             this.state.currentUrl = this.state.homeUrl;
             await this.engine.getPage().waitForTimeout(500);
             await this.processCurrentPage();
@@ -661,7 +698,13 @@ export class Repl {
           this.pushPageState();
           this.interceptor.clear();
           this.state.goalContext = { baseGoal: `browsing ${new URL(homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
-          await this.nav.goto(homeUrl);
+          try {
+            await this.nav.goto(homeUrl);
+          } catch (err) {
+            render.error((err as Error).message);
+            this.rl.prompt();
+            return;
+          }
           this.state.currentUrl = homeUrl;
           await this.engine.getPage().waitForTimeout(500);
           await this.processCurrentPage();
@@ -699,7 +742,13 @@ export class Repl {
           await this.syncBrowser();
           this.pushPageState();
           this.interceptor.clear();
-          await this.nav.goto(demoUrl);
+          try {
+            await this.nav.goto(demoUrl);
+          } catch (err) {
+            render.error((err as Error).message);
+            this.rl.prompt();
+            return;
+          }
           this.state.currentUrl = demoUrl;
           await this.engine.getPage().waitForTimeout(500);
           await this.processCurrentPage();
