@@ -1,12 +1,25 @@
 # TODO — Clawmium
 
-> Updated: 2026-02-15 (after Phase 5 session)
+> Updated: 2026-02-16 (after crawls design review — see `2026-02-16-1.md`)
 
-1. **[high]** Commit Phase 5 changes — HN comments, forms, goals, reflection ritual, tests (all uncommitted)
-2. **[high]** Anthropic provider testing — third session deferred; test with `conversationContext`, HN pages, form-heavy sites
-3. **[high]** Real-site HN testing — run `clm browse news.ycombinator.com`, navigate to item pages, verify comment extraction + LLM summary quality
-4. **[medium]** `max_tokens` tuning — 1024 may truncate long HN discussions and article summaries; consider scaling with input length
-5. **[medium]** Form detection integration — `detectInteractiveForms()` is built but not yet called from REPL; wire it into `_processCurrentPage()` to auto-detect and append fill choices
-6. **[medium]** Real-site form testing — test search on npmjs.com, Google, GitHub to verify `fillPlan` selectors work in practice
-7. **[low]** Trail-based navigation tree — replace linear page stack with branching tree; LLM interpretations annotate nodes (see MEMORY.md "Future Exploration")
-8. **[low]** Session persistence — save/restore state across runs (currently lost on exit)
+## High
+
+1. ~~Commit Phase 5 changes~~ — done (`ee22326`)
+2. **Wire form detection into REPL** — `detectInteractiveForms()` is built but not called from `_processCurrentPage()`; wire it in to auto-detect and append fill choices. Then test on real sites (npmjs.com, Google, GitHub).
+3. **Crawl tree — Phase 1 (data structures + persistence)** — `CrawlNode`, `Crawl`, `CrawlManager` interfaces in `src/crawl/`. Tree operations: create, find (dedup via nodeIndex), attach, detach, ancestors, display. Markdown persistence to `~/clm/crawls/`. Fields: `parentId`, `reachedBy`. All mechanical, testable without LLM or browser. See design in `2026-02-16-1.md`.
+4. **Crawl tree — Phase 2 (REPL hooks + /tree)** — Hook `addNavigation()` into REPL navigation paths as passive observer. Every navigation creates/finds a node. Single crawl auto-created on first navigation, timestamp-named. Add `/tree` display command.
+5. **`/auto` mode spike** — wire up `planAction()` behind `/auto <goal>`. Loop: `interpret -> planAction -> execute`, human interrupts with Ctrl+C or agent hands off auth. Test on CityServe demo first. Autonomous navigation should build crawl nodes as it goes.
+6. **MCP server — design + prototype** — Clawmium is agent-first; agents need a programmatic interface. Design which tools to expose (browse, extract, click, fill, screenshot, tree context?). Build a minimal MCP server.
+
+## Medium
+
+7. **Crawl tree — Phase 3 (LLM integration)** — Lifecycle LLM call: "extend current crawl or start new one?" LLM-driven naming. Feed crawl ancestor context into `interpret()` calls. GoalContext breadcrumb derived from tree when crawl is active.
+8. **Site quirks registry** — formalize the `sites/hn.ts` pattern. Generic HTML-standard core + site-specific overrides activated on demand (like browser extensions).
+9. **`max_tokens` tuning** — 1024 truncates long HN discussions and article summaries. Scale with input length or page type.
+10. **Anthropic provider parity** — test with `conversationContext`, HN pages, form-heavy sites. Fix when it naturally comes up.
+
+## Low / Parked
+
+11. **Crawl tree — Phase 4 (polish)** — `/crawl` commands (rename, end, list, load). Display refinements. Session log integration into crawl.md.
+12. **Crawl tree — Layer 3 (LLM reorganization)** — drift pruning, sub-tree detach/reattach, convergence detection. Future.
+13. **Session persistence (REPL state)** — save/restore REPL state across runs. Separate from crawl persistence (which is built into the crawl system). Lower priority now that crawls handle their own persistence.
