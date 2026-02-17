@@ -12,6 +12,11 @@ import {
   EXTRACT_DATA_SYSTEM_PROMPT,
 } from "./prompts";
 
+function tokenLimit(envVar: string, fallback: number): number {
+  const val = parseInt(process.env[envVar] || "", 10);
+  return val > 0 ? val : fallback;
+}
+
 export class OpenAIProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
@@ -29,7 +34,7 @@ export class OpenAIProvider implements LLMProvider {
 
     const response = await this.client.chat.completions.create({
       model: this.model,
-      max_tokens: 1024,
+      max_tokens: tokenLimit("MAX_TOKENS_INTERPRET", 2048),
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: INTERPRET_SYSTEM_PROMPT },
@@ -50,7 +55,7 @@ export class OpenAIProvider implements LLMProvider {
 
     const response = await this.client.chat.completions.create({
       model: this.model,
-      max_tokens: 512,
+      max_tokens: tokenLimit("MAX_TOKENS_PLAN", 512),
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: PLAN_ACTION_SYSTEM_PROMPT },
@@ -69,7 +74,7 @@ export class OpenAIProvider implements LLMProvider {
   async extractData(rawData: string, userGoal: string): Promise<ExtractedData> {
     const response = await this.client.chat.completions.create({
       model: this.model,
-      max_tokens: 1024,
+      max_tokens: tokenLimit("MAX_TOKENS_EXTRACT", 1024),
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: EXTRACT_DATA_SYSTEM_PROMPT },

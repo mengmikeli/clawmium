@@ -7,6 +7,7 @@ const CONFIG_PATH = path.join(CLM_DIR, "config.json");
 
 interface ClmConfig {
   homeUrl?: string;
+  lastSessionId?: string;
 }
 
 function ensureDir(dir: string): void {

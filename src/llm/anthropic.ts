@@ -12,6 +12,11 @@ import {
   EXTRACT_DATA_SYSTEM_PROMPT,
 } from "./prompts";
 
+function tokenLimit(envVar: string, fallback: number): number {
+  const val = parseInt(process.env[envVar] || "", 10);
+  return val > 0 ? val : fallback;
+}
+
 export class AnthropicProvider implements LLMProvider {
   private client: Anthropic;
   private model: string;
@@ -29,7 +34,7 @@ export class AnthropicProvider implements LLMProvider {
 
     const response = await this.client.messages.create({
       model: this.model,
-      max_tokens: 1024,
+      max_tokens: tokenLimit("MAX_TOKENS_INTERPRET", 2048),
       system: INTERPRET_SYSTEM_PROMPT,
       messages: [
         { role: "user", content: userMessage },
@@ -49,7 +54,7 @@ export class AnthropicProvider implements LLMProvider {
 
     const response = await this.client.messages.create({
       model: this.model,
-      max_tokens: 512,
+      max_tokens: tokenLimit("MAX_TOKENS_PLAN", 512),
       system: PLAN_ACTION_SYSTEM_PROMPT,
       messages: [
         {
@@ -67,7 +72,7 @@ export class AnthropicProvider implements LLMProvider {
   async extractData(rawData: string, userGoal: string): Promise<ExtractedData> {
     const response = await this.client.messages.create({
       model: this.model,
-      max_tokens: 1024,
+      max_tokens: tokenLimit("MAX_TOKENS_EXTRACT", 1024),
       system: EXTRACT_DATA_SYSTEM_PROMPT,
       messages: [
         {

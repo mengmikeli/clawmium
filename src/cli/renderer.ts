@@ -99,29 +99,102 @@ export function intercepted(method: string, url: string, statusCode: number, siz
   console.log(`${DIM}→ intercepted: ${method} ${path} (${statusCode}, ${size} bytes)${RESET}`);
 }
 
-export function banner(provider: string): void {
-  const providerLabel = provider === "openai" ? "GPT-4o (openai)" : "Claude (anthropic)";
-  const lines = [
-    `${BOLD}Clawmium v0.2${RESET}`,
-    "Agent-first browser",
-    `Provider: ${providerLabel}`,
-  ];
-  // Visible lengths (without ANSI codes)
-  const visibleLengths = [
-    "Clawmium v0.2".length,
-    "Agent-first browser".length,
-    `Provider: ${providerLabel}`.length,
-  ];
-  const innerWidth = Math.max(...visibleLengths) + 4;
+export function banner(provider: string): Promise<void> {
+  const BRIGHT_RED = "\x1b[91m";
+  const DIM_RED = "\x1b[2m\x1b[31m";
+  const HIDE_CURSOR = "\x1b[?25l";
+  const SHOW_CURSOR = "\x1b[?25h";
 
+  const providerLabel = provider === "openai" ? "GPT-4o (openai)" : "Claude (anthropic)";
+
+  // Text lines and their visible lengths (without ANSI codes)
+  const textLines = [
+    { ansi: `${BOLD}Clawmium v0.2${RESET}`, len: "Clawmium v0.2".length },
+    { ansi: "Agent-first browser", len: "Agent-first browser".length },
+    { ansi: `Provider: ${providerLabel}`, len: `Provider: ${providerLabel}`.length },
+  ];
+
+  // Claw animation frames — art only, no trailing padding
+  // open → closing → closed → opening → open
+  // len = actual visible character count (no embedded trailing spaces)
+  // The render loop pads with plain spaces: clawWidth - len
+  const frames = [
+    // Frame 0: open — " /\    /|" (9), "/  \__/ |" (9), "/   /___/" (9)
+    [
+      { ansi: `${DIM_RED} /\\${RESET}${RED}    ${RESET}${BRIGHT_RED}/|${RESET}`, len: 9 },
+      { ansi: `${DIM_RED}/  \\${RESET}${RED}__${RESET}${BRIGHT_RED}/ |${RESET}`, len: 9 },
+      { ansi: `${DIM_RED}/   /${RESET}${BRIGHT_RED}___/${RESET}`, len: 9 },
+    ],
+    // Frame 1: closing — " /\  /|" (7), "/  \/ |" (7), "/  /__/" (7)
+    [
+      { ansi: `${DIM_RED} /\\${RESET}${RED}  ${RESET}${BRIGHT_RED}/|${RESET}`, len: 7 },
+      { ansi: `${DIM_RED}/  \\${RESET}${BRIGHT_RED}/ |${RESET}`, len: 7 },
+      { ansi: `${DIM_RED}/  /${RESET}${BRIGHT_RED}__/${RESET}`, len: 7 },
+    ],
+    // Frame 2: closed — " /\/|" (5), "/  \|" (5), "/ /__/" (6)
+    [
+      { ansi: `${DIM_RED} /\\${RESET}${BRIGHT_RED}/|${RESET}`, len: 5 },
+      { ansi: `${DIM_RED}/  ${RESET}${BRIGHT_RED}\\|${RESET}`, len: 5 },
+      { ansi: `${DIM_RED}/ /${RESET}${BRIGHT_RED}__/${RESET}`, len: 6 },
+    ],
+    // Frame 3: opening (same as closing)
+    [
+      { ansi: `${DIM_RED} /\\${RESET}${RED}  ${RESET}${BRIGHT_RED}/|${RESET}`, len: 7 },
+      { ansi: `${DIM_RED}/  \\${RESET}${BRIGHT_RED}/ |${RESET}`, len: 7 },
+      { ansi: `${DIM_RED}/  /${RESET}${BRIGHT_RED}__/${RESET}`, len: 7 },
+    ],
+    // Frame 4: back to open
+    [
+      { ansi: `${DIM_RED} /\\${RESET}${RED}    ${RESET}${BRIGHT_RED}/|${RESET}`, len: 9 },
+      { ansi: `${DIM_RED}/  \\${RESET}${RED}__${RESET}${BRIGHT_RED}/ |${RESET}`, len: 9 },
+      { ansi: `${DIM_RED}/   /${RESET}${BRIGHT_RED}___/${RESET}`, len: 9 },
+    ],
+  ];
+
+  const gap = 3;
+  const textWidth = Math.max(...textLines.map(l => l.len));
+  const clawWidth = 9;
+  const innerWidth = textWidth + gap + clawWidth;
+
+  // Render a single frame (3 content lines) at a fixed position
+  const renderFrame = (clawArt: typeof frames[0]) => {
+    // Move cursor up 4 lines (3 content + bottom border)
+    process.stdout.write(`\x1b[4A`);
+    for (let i = 0; i < textLines.length; i++) {
+      const clawPad = " ".repeat(clawWidth - clawArt[i].len);
+      const textPad = " ".repeat(textWidth - textLines[i].len);
+      process.stdout.write(`  │ ${clawArt[i].ansi}${clawPad}${" ".repeat(gap)}${textLines[i].ansi}${textPad} │\n`);
+    }
+    process.stdout.write(`  ╰${"─".repeat(innerWidth + 2)}╯\n`);
+  };
+
+  // Draw initial frame
+  process.stdout.write(HIDE_CURSOR);
   console.log();
   console.log(`  ╭${"─".repeat(innerWidth + 2)}╮`);
-  for (let i = 0; i < lines.length; i++) {
-    const padding = " ".repeat(innerWidth - visibleLengths[i]);
-    console.log(`  │ ${lines[i]}${padding} │`);
+  const firstFrame = frames[0];
+  for (let i = 0; i < textLines.length; i++) {
+    const clawPad = " ".repeat(clawWidth - firstFrame[i].len);
+    const textPad = " ".repeat(textWidth - textLines[i].len);
+    console.log(`  │ ${firstFrame[i].ansi}${clawPad}${" ".repeat(gap)}${textLines[i].ansi}${textPad} │`);
   }
   console.log(`  ╰${"─".repeat(innerWidth + 2)}╯`);
-  console.log();
+
+  // Animate: cycle through frames twice (open→closed→open→closed→open)
+  const sequence = [...frames.slice(1), ...frames.slice(1)];
+  return new Promise<void>((resolve) => {
+    let idx = 0;
+    const interval = setInterval(() => {
+      renderFrame(sequence[idx]);
+      idx++;
+      if (idx >= sequence.length) {
+        clearInterval(interval);
+        process.stdout.write(SHOW_CURSOR);
+        console.log();
+        resolve();
+      }
+    }, 200);
+  });
 }
 
 export function help(): void {

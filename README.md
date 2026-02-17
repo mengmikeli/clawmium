@@ -1,194 +1,201 @@
 # Clawmium
 
-**The web is a text adventure and your agent has the walkthrough.**
+```
+    /\    /|
+   /  \__/ |
+  /   /___/
+```
 
-Clawmium is an agent-first, human-second browser. It runs headless Chromium behind an LLM-powered CLI — you type goals in plain English, and the agent reads pages, presents choices, extracts data, and handles auth. The browser window never appears unless you ask for it.
+> The web is a text adventure and your agent has the walkthrough.
+
+Clawmium (`clm`) is an agent-first browser. It runs a headless Chromium instance, feeds page content to an LLM, and gives you a terminal interface to navigate the web through numbered choices and natural language. The browser only renders pixels when you ask (`/show`). Works on real websites — Hacker News, blogs, news sites — not just demos.
+
+## What it looks like
+
+```
+  ╭──────────────────────────────────╮
+  │  /\    /|   Clawmium v0.2       │
+  │ /  \__/ |   Agent-first browser  │
+  │ /   /___/   Provider: GPT-4o    │
+  ╰──────────────────────────────────╯
+
+  Hacker News — Top Stories
+  Listing of 30 stories. Top items include an AI model that outperforms
+  GPT-4 on coding benchmarks, a Show HN for a Rust web framework, and
+  a discussion about remote work policies at major tech companies.
+  news.ycombinator.com
+
+  [1] AI model outperforms GPT-4 on coding benchmarks
+  [2] Show HN: A Rust web framework with zero-cost abstractions
+  [3] Remote work policies are shifting again at Big Tech
+  [4] The forgotten history of the telegraph network
+  [5] Ask HN: What are you working on this weekend?
+
+  tip: /show to open browser, /tree to see navigation path
+
+> 1
+
+  AI Model Outperforms GPT-4 on Coding Benchmarks
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ Researchers at DeepCode Labs released Coder-7B, a 7-billion     │
+  │ parameter model that scores 89.2% on HumanEval, surpassing      │
+  │ GPT-4's 86.4%. The model was trained on a curated dataset of    │
+  │ 2M verified code solutions with execution feedback. Key insight: │
+  │ smaller models can match larger ones when training data quality  │
+  │ is high enough. Available on HuggingFace under Apache 2.0.      │
+  └──────────────────────────────────────────────────────────────────┘
+
+  [1] Comments (342)
+  [2] DeepCode Labs blog post
+  [3] HuggingFace model card
+
+> what programming languages does it support?
+
+  Based on the article, Coder-7B was evaluated on Python, JavaScript,
+  TypeScript, Go, and Rust. Python had the highest scores (89.2% on
+  HumanEval), while Rust showed the most improvement over GPT-4.
+```
 
 ## Quick start
 
 ```bash
-git clone https://github.com/mengmikeli/clawmium.git
-cd clawmium
-npm install
-npx playwright install chromium
-cp .env.example .env   # then add your API key
-npm run clm
-```
+# 1. Clone and install
+git clone https://github.com/anthropics/clawmium && cd clawmium
+npm install && npx playwright install chromium
 
-## Usage
+# 2. Configure your LLM provider
+cp .env.example .env
+# Edit .env — add your OpenAI or Anthropic API key
 
-```bash
-# Start with a blank prompt — navigate with /goto or /home
+# 3. Browse (defaults to Hacker News)
 npm run clm
 
-# Start at a specific site
+# Or start at a specific site
 npm run clm -- browse nytimes.com
-
-# Run the CityServe demo (start the mock server first)
-npm run cityserve &
-npm run clm
-# then type /demo
 ```
-
-Once running, you interact through numbered choices and free-text questions:
-
-```
-→ page loaded: "The New York Times"
-→ News homepage with today's top stories across politics, world, business...
-
-  [1] U.S.
-  [2] World
-  [3] Business
-
-> 2
-→ navigating to World...
-```
-
-## Commands
-
-| Command | Description |
-|---|---|
-| `/goto <url>` | Navigate to a URL (bare domains work: `nytimes.com`) |
-| `/back` | Go back in page history |
-| `/forward` | Go forward in page history |
-| `/home` | Go to home URL (set with `/home <url>`) |
-| `/show` | Open the browser window |
-| `/hide` | Close the browser window |
-| `/refresh` | Re-analyze current page |
-| `/login` | Log in to current site (CLI auth — password masked) |
-| `/save` | Save extracted data to disk |
-| `/url` | Show current URL |
-| `/stack` | Show URL stack and sync status |
-| `/tree` | Show crawl navigation tree |
-| `/crawl` | Manage crawls (list, load, rename, end, info) |
-| `/clear` | Reset state (repl, crawl, browser, all) |
-| `/demo` | Run CityServe demo |
-| `/quit` | End session |
-| `/help` | Show help |
-
-Numbers select choices. Free text is sent to the LLM as a follow-up question.
-Ctrl+C cancels the current operation; double Ctrl+C exits.
 
 ## How it works
 
 ```
-          ┌─────────────┐
- You ───► │  CLI REPL    │ ◄─── free text / numbers / slash commands
-          └──────┬───────┘
-                 │
-          ┌──────▼───────┐     ┌──────────────┐
-          │  LLM Agent   │ ◄──►│  Headless     │
-          │  (interpret,  │     │  Chromium     │
-          │   extract,    │     │  (Playwright) │
-          │   plan)       │     └──────┬────────┘
-          └──────┬───────┘            │
-                 │              ┌─────▼──────┐
-          ┌──────▼───────┐     │  Network    │
-          │  Choices /    │     │  Interceptor│
-          │  Data Table   │     └────────────┘
-          └──────────────┘
+You (terminal)  →  CLM REPL  →  LLM (interpret page, extract data)
+                       ↕
+                  Playwright (headless Chromium)
+                       ↕
+                  Any website
 ```
 
-- **Headless by default** — Chromium runs invisibly. `/show` relaunches with a visible window (cookies transfer over). `/hide` goes back to headless.
-- **LLM interprets every page** — extracts a summary, navigation choices, and structured data. You never parse HTML yourself.
-- **Network interception** — captures same-origin JSON responses. When API data matches your goal, it's extracted directly (skipping the page render).
-- **CLI auth** — login forms are detected automatically and offered as a choice. Credentials are entered in the terminal with masked passwords, never in a browser popup.
-- **Page stack** — `/back` and `/forward` restore exact page state (summary + choices) without re-fetching.
-- **Data extraction** — structured data is formatted as tables and saved to `~/clm/<site>/`.
-- **Form detection** — Search boxes and filter forms are auto-detected and offered as numbered choices. Works with `<input>` and `<textarea>` elements (e.g. Google search).
-- **HN threads** — Hacker News discussion pages get special handling: comments are extracted with threading/depth and summarized by the LLM.
-- **Crawl tree** — every page visit becomes a node in a navigation tree. `/tree` shows your path with summaries; `/crawl list` shows saved crawls; `/crawl load` resumes a previous session.
+1. Headless Chromium navigates to a URL
+2. DOM content extracted + any intercepted same-origin JSON API responses
+3. LLM summarizes what the page *says* and offers numbered navigation choices
+4. You pick a number, ask a question in plain English, or use slash commands
+5. Repeat — data saved automatically to `~/clm/`
 
-## Crawl system
+The LLM never sees your credentials. Auth is detected heuristically and handled via masked terminal input.
 
-Navigation is automatically tracked as a tree — every page you visit becomes a node with URL, title, LLM summary, and conversation snippets. Crawl names are auto-derived from the first page's summary.
+## Navigation model
 
-Saved to `~/clm/crawls/` as markdown files with tree, node details, and session log sections.
+v0.2 tracks every page visit in a **crawl tree** — showing where you've been and how you got there.
 
-**`/crawl` subcommands:**
+### Crawl tree
 
-| Subcommand | Action |
-|---|---|
-| `/crawl list` | List all saved crawls |
-| `/crawl load` | Load a saved crawl and navigate to its last position |
-| `/crawl rename <name>` | Rename the active crawl |
-| `/crawl end` | Save and end the active crawl (start fresh on next navigation) |
-| `/crawl info` | Show details of the active crawl |
-
-## LLM providers
-
-Configured via `.env`:
-
-```bash
-# Use Anthropic (default)
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Or use OpenAI
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-```
-
-Anthropic uses Claude. OpenAI uses GPT-4o.
-
-## CityServe demo
-
-CityServe is a mock government services website included in the repo for testing auth flows and data extraction.
-
-```bash
-npm run cityserve          # starts on localhost:3000
-npm run clm                # in another terminal
-# type /demo to navigate there
-```
-
-The demo goal is "check my water bill" — the agent navigates CityServe, detects the login form, you authenticate via CLI, and it extracts your billing data into a table.
-
-## Project structure
+Every navigation creates a node. `/tree` shows your path:
 
 ```
-src/
-  index.ts              # Entry point, CLI arg parsing
-  browser/
-    engine.ts           # BrowserEngine (launch/show/hide/recover)
-    navigator.ts        # PageNavigator (goto/extract)
-    network.ts          # NetworkInterceptor (JSON capture)
-  auth/
-    detector.ts         # Login page detection (weighted heuristics)
-    handoff.ts          # CLI auth (raw stdin, password masking)
-  llm/
-    provider.ts         # LLMProvider interface
-    prompts.ts          # System prompts (interpret, plan, extract)
-    openai.ts           # OpenAI provider (GPT-4o)
-    anthropic.ts        # Anthropic provider (Claude)
-  sites/
-    hn.ts               # HN comment thread extraction
-  forms/
-    detector.ts         # Search/filter form detection
-  crawl/
-    tree.ts             # CrawlManager (node tree, navigation tracking)
-    persistence.ts      # Save/load/list crawls as markdown
-    context.ts          # Ancestor chain for LLM context
-    namer.ts            # Auto-name crawls from page summary
-  cli/
-    renderer.ts         # ANSI terminal output
-    repl.ts             # Main REPL loop
-    goals.ts            # Goal context (breadcrumb tracking)
-  output/
-    writer.ts           # Save data/session logs to ~/clm/
-cityserve/              # Mock government website
+hackernews  (Feb 17, 3:42pm)
+├── news.ycombinator.com  [root]
+│   ├── AI model outperforms GPT-4  [↗ choice]
+│   │   └── Comments (342)  [↗ choice]
+│   └── Show HN: Rust web framework  [↗ choice]
+```
+
+### Cursor history
+
+`/back` and `/forward` move through your visit history — like a browser, but restoring the full LLM interpretation (summary + choices) without re-fetching. `/history` shows the chronological log; `/history N` jumps to any entry.
+
+### Cross-domain stash
+
+When you `/goto` a different domain, your current crawl is **stashed** — not destroyed. `/back` at the start of a new site pops the stash and returns you where you were. Up to 10 crawls preserved.
+
+```
+[stash]  hackernews crawl (5 nodes)
+[stash]  nytimes crawl (3 nodes)
+[active] github.com (2 nodes)  ← you are here
+
+/back → pops nytimes from stash, restores position
+```
+
+### Session persistence
+
+Sessions auto-save every 60 seconds. On next launch, you're prompted to resume — full crawl tree, cursor position, conversation history, and stash all restored. Use `--new` to skip.
+
+## CLI commands
+
+| Command | Action |
+|---------|--------|
+| `/show` | Open browser window (transfers cookies) |
+| `/hide` | Close browser, return to headless |
+| `/goto <url>` | Navigate to URL (bare domains auto-prefixed) |
+| `/back` | Go back (pops stash across domains) |
+| `/forward` | Go forward |
+| `/home [url]` | Go to home URL, or set it |
+| `/refresh` | Re-analyze current page |
+| `/url` | Show current URL |
+| `/stack` | Show back/forward stack + sync status |
+| `/history [N]` | Visit history (N to jump) |
+| `/tree` | Show crawl navigation tree |
+| `/crawl` | Manage crawls: list, load, rename, end, info |
+| `/save` | Save data to disk |
+| `/clear` | Reset state: repl, crawl, browser, or all |
+| `/demo` | Run CityServe mock government site demo |
+| `/quit` | Save and exit |
+| `/help` | Show command list |
+| `1`, `2`, `3`... | Select a numbered choice |
+| Free text | Ask a follow-up question about the current page |
+| Ctrl+C | Cancel current operation (double-press to quit) |
+
+## File output
+
+```
+~/clm/
+  config.json                    # home URL + last session ID
+  crawls/
+    {id}.md                      # crawl tree + session log (human-readable)
+    {id}.session.json            # full session state (for resume)
+  hackernews/
+    session-log-2026-02-17.md
+  nytimes/
+    article-2026-02-17.json
+    session-log-2026-02-17.md
 ```
 
 ## Tests
 
-```bash
-npm run test:phase5    # Form detection, HN extraction, goals (91 assertions)
-npm run test:recover   # Browser crash recovery (14 tests)
-npm run test:crawl         # Crawl tree + persistence (113 assertions)
-npm run test:crawl-llm     # Crawl LLM integration (48 assertions)
-npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
-npm run test:browser   # Browser integration (needs CityServe running)
-npm run test:llm       # LLM provider test
-```
+| Suite | Command | Assertions |
+|-------|---------|------------|
+| Phase 5 | `npm run test:phase5` | 91 |
+| Recovery | `npm run test:recover` | 14 |
+| Crawl | `npm run test:crawl` | 152 |
+| Crawl LLM | `npm run test:crawl-llm` | 48 |
+| Crawl Phase 4 | `npm run test:crawl-phase4` | 31 |
+| Session | `npm run test:session` | 149 |
+| Stash eval | `npm run test:stash-eval` | 86 |
+| Browser | `npm run test:browser` | manual |
+| LLM | `npm run test:llm` | manual |
+
+## Known limitations
+
+- Anti-bot sites may return empty content (no stealth mode)
+- Anthropic provider less tested than OpenAI
+- No OAuth/SSO/2FA flows
+- Google and similar sites may trigger CAPTCHAs in headless mode
+
+## Tech stack
+
+- **TypeScript** (Node.js) via `tsx`
+- **Playwright** controlling headless Chromium
+- **OpenAI** / **Anthropic** SDKs for LLM (bring your own key)
+- **Express** for the CityServe mock site
+- No external CLI frameworks — raw ANSI escape codes + readline
 
 ## License
 

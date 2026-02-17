@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { CrawlManager, CrawlNode, Crawl, ReachedBy } from "./tree";
+import { loadSession, restoreManagerFromEnvelope } from "../session/persistence";
 
 // ===================================================================
 // Paths
@@ -178,6 +179,18 @@ export function saveCrawl(manager: CrawlManager, sessionLog?: Array<{ role: stri
 // ===================================================================
 
 export function loadCrawl(crawlId: string, manager: CrawlManager): boolean {
+  // Try JSON sidecar first (full restore with interpretations, cursor, goal context)
+  const envelope = loadSession(crawlId);
+  if (envelope) {
+    try {
+      restoreManagerFromEnvelope(envelope, manager);
+      return true;
+    } catch {
+      // Fall through to markdown
+    }
+  }
+
+  // Fall back to markdown (tree-only, no interpretations or cursor)
   const dir = getCrawlDir();
   const filepath = path.join(dir, `${crawlId}.md`);
   if (!fs.existsSync(filepath)) return false;

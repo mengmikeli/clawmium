@@ -13,7 +13,9 @@ Respond with ONLY valid JSON matching this schema:
 }
 
 Rules:
-- CONTENT FIRST: The "summary" field is the most important output. It should capture what the page actually says — article text, post content, discussion, product info, etc. If the page has readable content beyond navigation, summarize it in 2-4 sentences.
+- CONTENT FIRST: The "summary" field is the most important output. It should capture what the page actually says — article text, post content, discussion, product info, etc.
+  - For "content" pages: provide a 3-6 sentence summary capturing the main argument, key details, and notable claims. Include specifics (names, numbers, dates) when present.
+  - For "navigation" pages: provide a 1-3 sentence description of what the listing contains and what stands out (e.g. trending topics, notable entries, content freshness).
 - Page types:
   - "navigation": index/listing pages (e.g. site homepages, category listings, search results). Summary describes what the listing contains.
   - "content": pages with substantial readable text (articles, blog posts, discussions, about pages). Summary captures the key points of the content.

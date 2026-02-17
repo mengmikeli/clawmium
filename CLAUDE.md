@@ -68,7 +68,8 @@ clawmium/
 │   ├── __test__crawl.ts         # Crawl tree + persistence + stash (152 assertions)
 │   ├── __test__crawl_llm.ts     # Crawl LLM integration (48 assertions)
 │   ├── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
-│   └── __test__session.ts       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
+│   ├── __test__session.ts       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
+│   └── __test__stash_eval.ts    # Stash eval — cross-domain stash correctness (86 assertions)
 │
 ├── cityserve/               # Mock government website (CityServe)
 │   ├── server.ts            # Express server
@@ -373,6 +374,7 @@ npm run test:crawl         # Crawl tree + persistence + stash (152 assertions)
 npm run test:crawl-llm     # Crawl LLM integration (48 assertions)
 npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
 npm run test:session       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
+npm run test:stash-eval    # Stash eval — cross-domain stash correctness (86 assertions)
 ```
 
 ## File Output
