@@ -20,32 +20,40 @@ import { formatAncestorContext } from "../crawl/context";
 import { saveSession, restoreManagerFromEnvelope, SessionEnvelope } from "../session/persistence";
 import { executeChoice, ExecutionDeps } from "../auto/executor";
 import { runAuto, AutoResult } from "../auto/runner";
+import { SessionState, ReplContext, CommandHandler, NavigateOpts } from "./handler-types";
+
+// Command handler imports
+import { handleShow, handleHide, handleGoto, handleBack, handleForward, handleRefresh, handleHome, handleDemo } from "./handlers/navigation";
+import { handleSave, handleQuit, handleUrl, handleHelp, handleLogin, handleAuto, handleClear } from "./handlers/session";
+import { handleTree, handleStack, handleHistory, handleCrawl } from "./handlers/crawl";
 
 const LLM_TIMEOUT = 30_000; // 30s timeout for LLM calls
 
-// ANSI color helpers (duplicated from renderer for inline use)
-const RESET = "\x1b[0m";
-const CYAN = "\x1b[36m";
-const BOLD = "\x1b[1m";
+// Dispatch map for slash commands
+const COMMAND_HANDLERS: Record<string, CommandHandler> = {
+  show: handleShow,
+  hide: handleHide,
+  goto: handleGoto,
+  back: handleBack,
+  forward: handleForward,
+  refresh: handleRefresh,
+  home: handleHome,
+  demo: handleDemo,
+  save: handleSave,
+  quit: handleQuit,
+  url: handleUrl,
+  help: handleHelp,
+  login: handleLogin,
+  auto: handleAuto,
+  clear: handleClear,
+  tree: handleTree,
+  stack: handleStack,
+  history: handleHistory,
+  crawl: handleCrawl,
+};
 
 class CancelledError extends Error {
   constructor() { super("cancelled"); }
-}
-
-interface SessionState {
-  goalContext: GoalContext;
-  currentInterpretation: PageInterpretation | null;
-  previousInterpretation: PageInterpretation | null;
-  lastExtracted: ExtractedData | null;
-  lastPageTitle: string;
-  history: Array<{ role: "user" | "agent"; content: string }>;
-  log: Array<{ role: string; content: string; timestamp: number }>;
-  site: string;
-  loginAvailable: boolean;
-  detectedForms: DetectedForm[];
-  homeUrl: string;
-  currentUrl: string;  // REPL's current page URL — source of truth
-  pendingReachedBy: ReachedBy;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string, signal?: AbortSignal): Promise<T> {
@@ -272,6 +280,40 @@ export class Repl {
       this.interceptor.clear();
       await this.nav.goto(this.state.currentUrl);
     }
+  }
+
+  /**
+   * Shared navigation transaction: sync browser, truncate forward cursor,
+   * clear interceptor, set pendingReachedBy, run optional preNavigate hook,
+   * navigate, update currentUrl, settle, and process page.
+   *
+   * Returns true on success, false on navigation error (renders error inline).
+   */
+  private async navigateAndProcess(
+    url: string,
+    reachedBy: ReachedBy,
+    opts?: {
+      settleMs?: number;
+      preNavigate?: () => void | Promise<void>;
+    },
+  ): Promise<boolean> {
+    await this.syncBrowser();
+    this.crawlManager.truncateCursorForward();
+    this.interceptor.clear();
+    this.state.pendingReachedBy = reachedBy;
+    if (opts?.preNavigate) {
+      await opts.preNavigate();
+    }
+    try {
+      await this.nav.goto(url);
+    } catch (err) {
+      render.error((err as Error).message);
+      return false;
+    }
+    this.state.currentUrl = url;
+    await this.engine.getPage().waitForTimeout(opts?.settleMs ?? 500);
+    await this.processCurrentPage();
+    return true;
   }
 
   /**
@@ -542,640 +584,21 @@ export class Repl {
   }
 
   private async handleInput(input: string): Promise<void> {
-    // Slash commands
+    // Slash commands — dispatch to extracted handlers
     if (input.startsWith("/")) {
       const parts = input.slice(1).trim().split(/\s+/);
       const cmd = parts[0].toLowerCase();
       const arg = parts.slice(1).join(" ");
-      switch (cmd) {
-        case "show":
-          await this.syncBrowser();
-          if (this.engine.isShowing()) {
-            render.status("bringing browser window to focus...");
-          } else {
-            render.status("opening browser window...");
-          }
-          {
-            const created = await this.engine.show();
-            if (created) {
-              this.reattach();
-              // Wait for the headed page to be ready
-              try {
-                await this.engine.getPage().waitForLoadState("domcontentloaded", { timeout: 5_000 });
-              } catch { /* page may already be loaded */ }
-            }
-          }
-          this.logCommand("/show");
-          this.rl.prompt();
-          return;
-
-        case "hide":
-          await this.syncBrowser();
-          render.status("hiding browser window...");
-          await this.engine.hide();
-          this.reattach();
-          this.logCommand("/hide");
-          this.rl.prompt();
-          return;
-
-        case "goto": {
-          if (!arg) {
-            render.error("usage: /goto <url>");
-            this.rl.prompt();
-            return;
-          }
-          let url = arg;
-          let isExternal = false;
-          if (/^https?:\/\//.test(url)) {
-            // Already a full URL
-            isExternal = true;
-          } else if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(url)) {
-            // Bare domain like "nytimes.com" or "sub.example.com/path"
-            url = `https://${url}`;
-            isExternal = true;
-          } else {
-            // Relative path on current site
-            url = `${this.engine.getBaseUrl()}${url.startsWith("/") ? "" : "/"}${url}`;
-          }
-          // Reset goal and base URL when navigating to an external site
-          if (isExternal) {
-            this.stashCrawl();  // stash current crawl for /back recovery across domains
-            this.state.goalContext = { baseGoal: `browsing ${new URL(url).hostname}`, activeIntent: "", breadcrumb: [] };
-            const origin = new URL(url).origin;
-            this.engine.setBaseUrl(origin);
-            this.state.site = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
-          }
-          render.status(`navigating to ${url}...`);
-          await this.syncBrowser();
-          this.crawlManager.truncateCursorForward();
-          this.interceptor.clear();
-          this.state.pendingReachedBy = "goto";
-          try {
-            await this.nav.goto(url);
-          } catch (err) {
-            render.error((err as Error).message);
-            this.rl.prompt();
-            return;
-          }
-          this.state.currentUrl = url;
-          await this.engine.getPage().waitForTimeout(500);
-          await this.processCurrentPage();
-          this.logCommand(`/goto ${arg}`);
-          this.rl.prompt();
-          return;
-        }
-
-        case "back": {
-          const entry = this.crawlManager.cursorBack();
-          if (entry) {
-            const node = this.crawlManager.getNode(entry.nodeId);
-            if (node) {
-              this.crawlManager.navigateToNode(node.id);
-              this.restoreFromNode(node);
-              render.hint(["/refresh to update content"]);
-            } else {
-              render.warn("node not found in crawl tree");
-            }
-          } else if (this.crawlManager.hasStash()) {
-            // At start of current crawl — pop stash to return to previous domain
-            // Save current small crawl to disk first
-            if (this.crawlManager.activeCrawl) {
-              try {
-                saveCrawl(this.crawlManager, this.state.log);
-                this.saveSessionSidecar();
-              } catch { /* save failed — continue */ }
-            }
-            const restored = this.crawlManager.popStash();
-            if (restored) {
-              const node = this.crawlManager.currentNodeId
-                ? this.crawlManager.getNode(this.crawlManager.currentNodeId)
-                : null;
-              if (node) {
-                // Restore REPL state from the stashed crawl's current node
-                try {
-                  const hostname = new URL(node.url).hostname;
-                  this.state.site = hostname.replace(/^www\./, "").split(".")[0];
-                  this.engine.setBaseUrl(new URL(node.url).origin);
-                } catch { /* invalid URL */ }
-                this.restoreFromNode(node);
-                render.status(`returned to stashed crawl: "${restored.name}"`);
-                render.hint(["/refresh to update content"]);
-              }
-            }
-          } else {
-            render.warn("no history to go back to");
-          }
-          this.logCommand("/back");
-          this.rl.prompt();
-          return;
-        }
-
-        case "forward": {
-          const entry = this.crawlManager.cursorForward();
-          if (entry) {
-            const node = this.crawlManager.getNode(entry.nodeId);
-            if (node) {
-              this.crawlManager.navigateToNode(node.id);
-              this.restoreFromNode(node);
-              render.hint(["/refresh to update content"]);
-            } else {
-              render.warn("node not found in crawl tree");
-            }
-          } else {
-            render.warn("no forward history");
-          }
-          this.logCommand("/forward");
-          this.rl.prompt();
-          return;
-        }
-
-        case "refresh":
-          await this.syncBrowser();
-          render.status("refreshing page...");
-          this.interceptor.clear();
-          await this.processCurrentPage();
-          this.logCommand("/refresh");
-          this.rl.prompt();
-          return;
-
-        case "save":
-          this.forceSave();
-          this.logCommand("/save");
-          this.rl.prompt();
-          return;
-
-        case "login":
-          await this.runLoginFlow();
-          this.logCommand("/login");
-          return;
-
-        case "home": {
-          if (arg === "clear") {
-            this.state.homeUrl = "";
-            saveConfig({ homeUrl: "" });
-            render.success("home URL cleared");
-            this.logCommand("/home clear");
-            this.rl.prompt();
-            return;
-          }
-          if (arg) {
-            // /home set <url> or /home <url>
-            let url = arg.replace(/^set\s+/, "");
-            if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(url)) {
-              url = `https://${url}`;
-            }
-            this.state.homeUrl = url;
-            saveConfig({ homeUrl: url });
-            render.success(`home URL set to ${url}`);
-            this.logCommand(`/home ${arg}`);
-            this.rl.prompt();
-            return;
-          }
-          if (this.state.homeUrl) {
-            // Navigate to home
-            render.status(`navigating to ${this.state.homeUrl}...`);
-            await this.syncBrowser();
-            this.crawlManager.truncateCursorForward();
-            this.interceptor.clear();
-            this.state.pendingReachedBy = "goto";
-            this.state.goalContext = { baseGoal: `browsing ${new URL(this.state.homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
-            try {
-              await this.nav.goto(this.state.homeUrl);
-            } catch (err) {
-              render.error((err as Error).message);
-              this.rl.prompt();
-              return;
-            }
-            this.state.currentUrl = this.state.homeUrl;
-            await this.engine.getPage().waitForTimeout(500);
-            await this.processCurrentPage();
-            this.logCommand("/home");
-            this.rl.prompt();
-            return;
-          }
-          // No home URL set — prompt user
-          const answer = await new Promise<string>((resolve) => {
-            this.rl.question("  enter home URL (or 'cancel'): ", resolve);
-          });
-          const trimmed = answer.trim();
-          if (!trimmed || trimmed.toLowerCase() === "cancel") {
-            this.rl.prompt();
-            return;
-          }
-          let homeUrl = trimmed;
-          if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(homeUrl)) {
-            homeUrl = `https://${homeUrl}`;
-          }
-          this.state.homeUrl = homeUrl;
-          saveConfig({ homeUrl });          render.success(`home URL set to ${homeUrl}`);
-          render.status(`navigating to ${homeUrl}...`);
-          await this.syncBrowser();
-          this.crawlManager.truncateCursorForward();
-          this.interceptor.clear();
-          this.state.pendingReachedBy = "goto";
-          this.state.goalContext = { baseGoal: `browsing ${new URL(homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
-          try {
-            await this.nav.goto(homeUrl);
-          } catch (err) {
-            render.error((err as Error).message);
-            this.rl.prompt();
-            return;
-          }
-          this.state.currentUrl = homeUrl;
-          await this.engine.getPage().waitForTimeout(500);
-          await this.processCurrentPage();
-          this.logCommand("/home");
-          this.rl.prompt();
-          return;
-        }
-
-        case "quit":
-          await this.shutdown();
-          return;
-
-        case "url": {
-          console.log(this.state.currentUrl || "(no URL)");
-          this.rl.prompt();
-          return;
-        }
-
-        case "stack": {
-          let browserUrl = "(unknown)";
-          try { browserUrl = this.engine.getPage().url(); } catch { /* dead page */ }
-          const synced = browserUrl === this.state.currentUrl;
-
-          // Build back/forward stacks from cursor history
-          const cursor = this.crawlManager.getCursorHistory();
-          const cidx = this.crawlManager.cursorIndex;
-          const backEntries: render.StackEntry[] = [];
-          const fwdEntries: render.StackEntry[] = [];
-          for (let i = 0; i < cidx; i++) {
-            const node = this.crawlManager.getNode(cursor[i].nodeId);
-            if (node) backEntries.push({ url: node.url, title: node.title });
-          }
-          for (let i = cidx + 1; i < cursor.length; i++) {
-            const node = this.crawlManager.getNode(cursor[i].nodeId);
-            if (node) fwdEntries.push({ url: node.url, title: node.title });
-          }
-
-          render.stackView(
-            { url: this.state.currentUrl, title: this.state.lastPageTitle },
-            browserUrl,
-            synced,
-            backEntries,
-            fwdEntries,
-          );
-          // Show stash indicator if there are stashed crawls
-          if (this.crawlManager.hasStash()) {
-            const stashNames = this.crawlManager.stash.map(s => s.activeCrawl.name);
-            render.stashIndicator(this.crawlManager.getStashDepth(), stashNames);
-          }
-          this.logCommand("/stack");
-          this.rl.prompt();
-          return;
-        }
-
-        case "history": {
-          if (arg) {
-            // /history N — jump to entry
-            const n = parseInt(arg, 10);
-            if (isNaN(n)) {
-              render.error("usage: /history [N]");
-              this.rl.prompt();
-              return;
-            }
-            await this.jumpToHistory(n);
-            this.logCommand(`/history ${n}`);
-            this.rl.prompt();
-            return;
-          }
-          // /history — show list (combined across stash + active crawl)
-          const fullCursor = this.crawlManager.getFullCursorHistory();
-          if (fullCursor.length === 0) {
-            render.status("no visit history yet — navigate to start recording");
-            this.rl.prompt();
-            return;
-          }
-          // Compute the current entry index in the full history
-          // Active crawl's cursorIndex maps to the last segment of fullCursor
-          const stashEntryCount = fullCursor.length - this.crawlManager.cursorHistory.length;
-          const activeCursorIdx = this.crawlManager.cursorIndex;
-          const fullCurrentIdx = activeCursorIdx >= 0 ? stashEntryCount + activeCursorIdx : -1;
-
-          const histEntries: render.HistoryEntry[] = fullCursor.map((entry, i) => {
-            const node = this.crawlManager.getNodeAcrossStash(entry.nodeId);
-            return {
-              index: i + 1,
-              title: node?.title || "(untitled)",
-              url: node?.url || "",
-              reachedBy: entry.reachedBy,
-              timestamp: entry.timestamp,
-              summary: node?.metadata?.summary,
-              isCurrent: i === fullCurrentIdx,
-              crawlName: (entry as FullCursorEntry).crawlName,
-            };
-          });
-          render.historyList(histEntries);
-          render.hint(["type /history N to jump to an entry"]);
-          this.logCommand("/history");
-          this.rl.prompt();
-          return;
-        }
-
-        case "help":
-          render.help();
-          this.logCommand("/help");
-          this.rl.prompt();
-          return;
-
-        case "auto": {
-          const autoGoal = arg;
-          if (!autoGoal) {
-            render.error("usage: /auto <goal>");
-            this.rl.prompt();
-            return;
-          }
-          await this.runAutoMode(autoGoal);
-          this.logCommand(`/auto ${autoGoal}`);
-          this.rl.prompt();
-          return;
-        }
-
-        case "demo": {
-          const demoUrl = process.env.BASE_URL || "http://localhost:3000";
-          this.state.goalContext = { baseGoal: "check my water bill", activeIntent: "", breadcrumb: [] };
-          render.progress("checking if CityServe is running...");
-          const serverReady = await this.ensureCityServe();
-          if (!serverReady) {
-            render.progressDone();
-            render.error("could not start CityServe — try running `npm run cityserve` in another terminal");
-            this.rl.prompt();
-            return;
-          }
-          render.progressDone();
-          render.status(`starting CityServe demo at ${demoUrl}...`);
-          await this.syncBrowser();
-          this.crawlManager.truncateCursorForward();
-          this.interceptor.clear();
-          this.state.pendingReachedBy = "goto";
-          try {
-            await this.nav.goto(demoUrl);
-          } catch (err) {
-            render.error((err as Error).message);
-            this.rl.prompt();
-            return;
-          }
-          this.state.currentUrl = demoUrl;
-          await this.engine.getPage().waitForTimeout(500);
-          await this.processCurrentPage();
-          this.logCommand("/demo");
-          this.rl.prompt();
-          return;
-        }
-
-        case "tree": {
-          const tree = this.crawlManager.getEnrichedDisplayTree();
-          if (!tree) {
-            render.status("no crawl tree yet — navigate to start recording");
-          } else {
-            console.log();
-            console.log(tree);
-            console.log();
-          }
-          this.logCommand("/tree");
-          this.rl.prompt();
-          return;
-        }
-
-        case "crawl": {
-          const sub = parts[1]?.toLowerCase() || "";
-          const subArg = parts.slice(2).join(" ");
-          switch (sub) {
-            case "list": {
-              const ids = listCrawls();
-              if (ids.length === 0) {
-                render.status("no saved crawls");
-                this.rl.prompt();
-                return;
-              }
-              const crawls: Array<{ index: number; name: string; rootUrl: string; nodeCount: number; created: number }> = [];
-              for (const id of ids) {
-                const peek = peekCrawl(id);
-                if (peek) crawls.push({ index: 0, ...peek });
-              }
-              // Sort by created date descending (newest first)
-              crawls.sort((a, b) => b.created - a.created);
-              crawls.forEach((c, i) => { c.index = i + 1; });
-              render.crawlList(crawls);
-              this.logCommand("/crawl list");
-              this.rl.prompt();
-              return;
-            }
-
-            case "load": {
-              const ids = listCrawls();
-              if (ids.length === 0) {
-                render.status("no saved crawls to load");
-                this.rl.prompt();
-                return;
-              }
-              // Build peek list
-              const crawls: Array<{ index: number; id: string; name: string; rootUrl: string; nodeCount: number; created: number }> = [];
-              for (const id of ids) {
-                const peek = peekCrawl(id);
-                if (peek) crawls.push({ index: 0, ...peek });
-              }
-              crawls.sort((a, b) => b.created - a.created);
-              crawls.forEach((c, i) => { c.index = i + 1; });
-
-              let pickNum = parseInt(subArg, 10);
-              if (isNaN(pickNum)) {
-                // Show list and prompt
-                render.crawlList(crawls);
-                const answer = await new Promise<string>((resolve) => {
-                  this.rl.question("  pick a crawl number: ", resolve);
-                });
-                pickNum = parseInt(answer.trim(), 10);
-                if (isNaN(pickNum)) {
-                  render.status("cancelled");
-                  this.rl.prompt();
-                  return;
-                }
-              }
-
-              const picked = crawls.find((c) => c.index === pickNum);
-              if (!picked) {
-                render.error(`no crawl at index ${pickNum}`);
-                this.rl.prompt();
-                return;
-              }
-
-              // Stash current crawl if active (preserve history when loading old crawls)
-              if (this.crawlManager.activeCrawl) {
-                render.status("stashing active crawl...");
-                this.stashCrawl();
-              }
-
-              const loaded = loadCrawl(picked.id, this.crawlManager);
-              if (!loaded) {
-                render.error("failed to load crawl");
-                this.rl.prompt();
-                return;
-              }
-
-              // Set REPL position to the loaded crawl's current node
-              const currentNode = this.crawlManager.currentNodeId
-                ? this.crawlManager.getNode(this.crawlManager.currentNodeId)
-                : null;
-              if (currentNode) {
-                this.state.currentUrl = currentNode.url;
-                this.state.lastPageTitle = currentNode.title;
-                // Restore interpretation from node metadata if available
-                if (currentNode.metadata?.interpretation) {
-                  this.setInterpretation(currentNode.metadata.interpretation);
-                }
-                if (currentNode.metadata?.goalContext) {
-                  this.state.goalContext = {
-                    ...currentNode.metadata.goalContext,
-                    breadcrumb: [...(currentNode.metadata.goalContext.breadcrumb || [])],
-                  };
-                }
-              }
-
-              render.success(`loaded crawl: "${this.crawlManager.activeCrawl?.name || picked.name}"`);
-              this.logCommand(`/crawl load ${pickNum}`);
-              this.rl.prompt();
-              return;
-            }
-
-            case "rename": {
-              if (!this.crawlManager.activeCrawl) {
-                render.warn("no active crawl");
-                this.rl.prompt();
-                return;
-              }
-              if (!subArg) {
-                render.error("usage: /crawl rename <name>");
-                this.rl.prompt();
-                return;
-              }
-              this.crawlManager.activeCrawl.name = subArg;
-              render.success(`crawl renamed to: "${subArg}"`);
-              this.logCommand(`/crawl rename ${subArg}`);
-              this.rl.prompt();
-              return;
-            }
-
-            case "end": {
-              if (!this.crawlManager.activeCrawl) {
-                render.warn("no active crawl to end");
-                this.rl.prompt();
-                return;
-              }
-              try {
-                const filepath = saveCrawl(this.crawlManager, this.state.log);
-                this.saveSessionSidecar();
-                this.crawlManager.clearActive();  // preserve stash — user can still /back
-                render.success(`crawl saved to: ${filepath}`);
-              } catch (err) {
-                render.error(`failed to save crawl: ${(err as Error).message}`);
-              }
-              this.logCommand("/crawl end");
-              this.rl.prompt();
-              return;
-            }
-
-            case "info": {
-              if (!this.crawlManager.activeCrawl) {
-                render.warn("no active crawl");
-                this.rl.prompt();
-                return;
-              }
-              const crawl = this.crawlManager.activeCrawl;
-              const rootNode = this.crawlManager.nodes.get(crawl.rootId);
-              const currentNode = this.crawlManager.currentNodeId
-                ? this.crawlManager.getNode(this.crawlManager.currentNodeId)
-                : null;
-              render.crawlInfo(
-                crawl.name,
-                crawl.created,
-                this.crawlManager.nodes.size,
-                rootNode?.url || "(unknown)",
-                currentNode?.title || "(unknown)",
-              );
-              this.logCommand("/crawl info");
-              this.rl.prompt();
-              return;
-            }
-
-            default: {
-              // Show /crawl subcommand help
-              console.log();
-              console.log(`  ${BOLD}Crawl subcommands:${RESET}`);
-              console.log(`  ${CYAN}/crawl list${RESET}           List saved crawls`);
-              console.log(`  ${CYAN}/crawl load [N]${RESET}       Load a saved crawl by number`);
-              console.log(`  ${CYAN}/crawl rename <name>${RESET}  Rename the active crawl`);
-              console.log(`  ${CYAN}/crawl end${RESET}            Save and end the active crawl`);
-              console.log(`  ${CYAN}/crawl info${RESET}           Show active crawl metadata`);
-              console.log();
-              this.rl.prompt();
-              return;
-            }
-          }
-        }
-
-        case "clear": {
-          const scope = arg.toLowerCase() || "all";
-          const validScopes = ["repl", "crawl", "browser", "all"];
-          if (!validScopes.includes(scope)) {
-            render.error(`unknown scope: ${scope} (use repl, crawl, browser, or all)`);
-            this.rl.prompt();
-            return;
-          }
-
-          // Build summary of what will be cleared
-          const items: string[] = [];
-          if (scope === "repl" || scope === "all") {
-            items.push("REPL stacks, interpretations, history, log, goal");
-          }
-          if (scope === "crawl" || scope === "all") {
-            const stashNote = this.crawlManager.hasStash() ? ` + ${this.crawlManager.getStashDepth()} stashed` : "";
-            items.push("crawl tree" + stashNote + (this.crawlManager.activeCrawl ? " (will auto-save first)" : ""));
-          }
-          if (scope === "browser" || scope === "all") {
-            items.push("browser cookies, localStorage, sessionStorage");
-          }
-
-          render.clearSummary(items);
-          const confirmed = await this.confirmAction("proceed?");
-          if (!confirmed) {
-            render.status("cancelled");
-            this.rl.prompt();
-            return;
-          }
-
-          if (scope === "repl" || scope === "all") {
-            this.clearRepl();
-          }
-          if (scope === "crawl" || scope === "all") {
-            this.clearCrawl();
-          }
-          if (scope === "browser" || scope === "all") {
-            await this.clearBrowser();
-          }
-
-          render.success(`cleared: ${scope}`);
-          this.logCommand(`/clear ${scope}`);
-          this.rl.prompt();
-          return;
-        }
-
-        default:
-          render.error(`unknown command: /${cmd}`);
-          render.help();
-          this.rl.prompt();
-          return;
+      const handler = COMMAND_HANDLERS[cmd];
+      if (handler) {
+        const result = await handler(this.buildContext(), arg, parts.slice(1));
+        if (!result?.promptHandled) this.rl.prompt();
+        return;
       }
+      render.error(`unknown command: /${cmd}`);
+      render.help();
+      this.rl.prompt();
+      return;
     }
 
     // Command-like input detection — prompt if user typed a bare command name
@@ -1560,6 +983,45 @@ export class Repl {
       setPendingReachedBy: (rb: string) => { this.state.pendingReachedBy = rb as ReachedBy; },
       crawlManager: this.crawlManager,
       interceptor: this.interceptor,
+    };
+  }
+
+  /**
+   * Build the ReplContext dependency bag for command handlers.
+   */
+  private buildContext(): ReplContext {
+    return {
+      state: this.state,
+      engine: this.engine,
+      nav: this.nav,
+      interceptor: this.interceptor,
+      crawlManager: this.crawlManager,
+      llm: this.llm,
+      signal: this.signal,
+      rl: this.rl,
+
+      syncBrowser: () => this.syncBrowser(),
+      processCurrentPage: () => this.processCurrentPage(),
+      navigateAndProcess: (url, reachedBy, opts) => this.navigateAndProcess(url, reachedBy, opts),
+      reattach: () => this.reattach(),
+      buildExecDeps: () => this.buildExecDeps(),
+      restoreFromNode: (node) => this.restoreFromNode(node),
+      stashCrawl: () => this.stashCrawl(),
+      clearRepl: () => this.clearRepl(),
+      clearCrawl: () => this.clearCrawl(),
+      clearBrowser: () => this.clearBrowser(),
+      runLoginFlow: () => this.runLoginFlow(),
+      runAutoMode: (goal) => this.runAutoMode(goal),
+      confirmAction: (q) => this.confirmAction(q),
+      jumpToHistory: (n) => this.jumpToHistory(n),
+      suggestCommands: () => this.suggestCommands(),
+      setInterpretation: (interp) => this.setInterpretation(interp),
+      forceSave: () => this.forceSave(),
+      saveSessionSidecar: () => this.saveSessionSidecar(),
+      ensureCityServe: () => this.ensureCityServe(),
+      shutdown: () => this.shutdown(),
+      logAgent: (msg) => this.logAgent(msg),
+      logCommand: (cmd) => this.logCommand(cmd),
     };
   }
 

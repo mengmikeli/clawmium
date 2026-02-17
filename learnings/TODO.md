@@ -1,6 +1,6 @@
 # TODO — Clawmium
 
-> Updated: 2026-02-17 (Strategic shift — infrastructure solid, focus on LLM intelligence)
+> Updated: 2026-02-18 (REPL refactor Phases 0–2 complete)
 
 ## High
 
@@ -11,6 +11,7 @@
 5. ~~**Split `/url` into `/url` + `/stack`**~~ — done (`e3b1fe4`). `/url` now prints just the current URL (one line). Old debug view (browser URL, sync status, back/forward stacks) moved to `/stack`.
 6. ~~**`/auto` mode spike**~~ — done. `/auto <goal>` drives autonomous browsing loop (interpret → planAutoAction → executeChoice). Stops on: data found, step limit, loop detection, consecutive errors, abort, or `ask_human`. `executeChoice()` extracted to `src/auto/executor.ts` (shared between human + auto paths — first REPL refactor extraction). 63 unit assertions + E2E test against CityServe.
 7. **MCP server — design + prototype** — Clawmium is agent-first; agents need a programmatic interface. Design which tools to expose (browse, extract, click, fill, screenshot, tree context?). Build a minimal MCP server.
+19. ~~**REPL refactor Phases 0–2**~~ — done (`2026-02-18-0.md`). Phase 0: safety net tests (43 assertions). Phase 1: `navigateAndProcess()` extraction (single navigation transaction). Phase 2: command handler extraction (4 new files, 689 lines, dispatch map). `repl.ts` reduced from 2134→1596 lines, `rl.prompt()` from 58→15, `case` branches from 23→0. 524 total assertions, 0 failures.
 
 ## Medium
 
@@ -18,6 +19,7 @@
 9. **Site quirks registry** — formalize the `sites/hn.ts` pattern. Generic HTML-standard core + site-specific overrides activated on demand (like browser extensions).
 10. ~~**`max_tokens` tuning**~~ — done. Configurable via `MAX_TOKENS_INTERPRET` / `MAX_TOKENS_PLAN` / `MAX_TOKENS_EXTRACT` env vars. Default interpret raised from 1024→2048. Both providers use shared `tokenLimit()` helper. Prompt updated: content pages get 3-6 sentence summaries, navigation 1-3 sentences.
 11. **Anthropic provider parity** — test with `conversationContext`, HN pages, form-heavy sites. Fix when it naturally comes up.
+20. **REPL refactor Phase 3 — non-command executors** — Extract choice execution (~80 lines) and free-text follow-up (~50 lines) from `handleInput()`. Would reduce it to pure dispatch. Self-contained, no dependencies.
 
 ## Next Up — LLM Intelligence Focus
 
@@ -33,3 +35,4 @@
 12. ~~**Crawl tree — Phase 4 (polish)**~~ — done. `/crawl` command with subcommands (list, load, rename, end, info). `peekCrawl()` for fast header-only reads. Enriched `/tree` display with summaries, ANSI colors, and reachedBy icons. Session log section in saved crawl markdown.
 13. **Crawl tree — Layer 3 (LLM reorganization)** — drift pruning, sub-tree detach/reattach, convergence detection. Future.
 14. ~~**Session persistence (REPL state)**~~ — done. `SessionEnvelope` JSON sidecar, auto-resume on startup, periodic auto-save (60s), 118 assertions.
+21. **REPL refactor Phases 4-5** — Deferred. Phase 4: session/crawl coordination boundary (extract stash orchestration + node restoration). Phase 5: prompt lifecycle normalization (centralize remaining 15 `rl.prompt()` calls). Wait for feature pressure.

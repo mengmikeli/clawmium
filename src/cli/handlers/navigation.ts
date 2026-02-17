@@ -1,0 +1,226 @@
+import { ReplContext, HandlerResult } from "../handler-types";
+import * as render from "../renderer";
+import { saveConfig } from "../../output/writer";
+import { saveCrawl } from "../../crawl/persistence";
+
+// ===================================================================
+// /show
+// ===================================================================
+
+export async function handleShow(ctx: ReplContext): Promise<void> {
+  await ctx.syncBrowser();
+  if (ctx.engine.isShowing()) {
+    render.status("bringing browser window to focus...");
+  } else {
+    render.status("opening browser window...");
+  }
+  const created = await ctx.engine.show();
+  if (created) {
+    ctx.reattach();
+    try {
+      await ctx.engine.getPage().waitForLoadState("domcontentloaded", { timeout: 5_000 });
+    } catch { /* page may already be loaded */ }
+  }
+  ctx.logCommand("/show");
+}
+
+// ===================================================================
+// /hide
+// ===================================================================
+
+export async function handleHide(ctx: ReplContext): Promise<void> {
+  await ctx.syncBrowser();
+  render.status("hiding browser window...");
+  await ctx.engine.hide();
+  ctx.reattach();
+  ctx.logCommand("/hide");
+}
+
+// ===================================================================
+// /goto
+// ===================================================================
+
+export async function handleGoto(ctx: ReplContext, arg: string): Promise<void> {
+  if (!arg) {
+    render.error("usage: /goto <url>");
+    return;
+  }
+  let url = arg;
+  let isExternal = false;
+  if (/^https?:\/\//.test(url)) {
+    isExternal = true;
+  } else if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(url)) {
+    url = `https://${url}`;
+    isExternal = true;
+  } else {
+    url = `${ctx.engine.getBaseUrl()}${url.startsWith("/") ? "" : "/"}${url}`;
+  }
+  if (isExternal) {
+    ctx.stashCrawl();
+    ctx.state.goalContext = { baseGoal: `browsing ${new URL(url).hostname}`, activeIntent: "", breadcrumb: [] };
+    const origin = new URL(url).origin;
+    ctx.engine.setBaseUrl(origin);
+    ctx.state.site = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
+  }
+  render.status(`navigating to ${url}...`);
+  await ctx.navigateAndProcess(url, "goto");
+  ctx.logCommand(`/goto ${arg}`);
+}
+
+// ===================================================================
+// /back
+// ===================================================================
+
+export async function handleBack(ctx: ReplContext): Promise<void> {
+  const entry = ctx.crawlManager.cursorBack();
+  if (entry) {
+    const node = ctx.crawlManager.getNode(entry.nodeId);
+    if (node) {
+      ctx.crawlManager.navigateToNode(node.id);
+      ctx.restoreFromNode(node);
+      render.hint(["/refresh to update content"]);
+    } else {
+      render.warn("node not found in crawl tree");
+    }
+  } else if (ctx.crawlManager.hasStash()) {
+    // At start of current crawl — pop stash to return to previous domain
+    if (ctx.crawlManager.activeCrawl) {
+      try {
+        saveCrawl(ctx.crawlManager, ctx.state.log);
+        ctx.saveSessionSidecar();
+      } catch { /* save failed — continue */ }
+    }
+    const restored = ctx.crawlManager.popStash();
+    if (restored) {
+      const node = ctx.crawlManager.currentNodeId
+        ? ctx.crawlManager.getNode(ctx.crawlManager.currentNodeId)
+        : null;
+      if (node) {
+        try {
+          const hostname = new URL(node.url).hostname;
+          ctx.state.site = hostname.replace(/^www\./, "").split(".")[0];
+          ctx.engine.setBaseUrl(new URL(node.url).origin);
+        } catch { /* invalid URL */ }
+        ctx.restoreFromNode(node);
+        render.status(`returned to stashed crawl: "${restored.name}"`);
+        render.hint(["/refresh to update content"]);
+      }
+    }
+  } else {
+    render.warn("no history to go back to");
+  }
+  ctx.logCommand("/back");
+}
+
+// ===================================================================
+// /forward
+// ===================================================================
+
+export async function handleForward(ctx: ReplContext): Promise<void> {
+  const entry = ctx.crawlManager.cursorForward();
+  if (entry) {
+    const node = ctx.crawlManager.getNode(entry.nodeId);
+    if (node) {
+      ctx.crawlManager.navigateToNode(node.id);
+      ctx.restoreFromNode(node);
+      render.hint(["/refresh to update content"]);
+    } else {
+      render.warn("node not found in crawl tree");
+    }
+  } else {
+    render.warn("no forward history");
+  }
+  ctx.logCommand("/forward");
+}
+
+// ===================================================================
+// /refresh
+// ===================================================================
+
+export async function handleRefresh(ctx: ReplContext): Promise<void> {
+  await ctx.syncBrowser();
+  render.status("refreshing page...");
+  ctx.interceptor.clear();
+  await ctx.processCurrentPage();
+  ctx.logCommand("/refresh");
+}
+
+// ===================================================================
+// /home
+// ===================================================================
+
+export async function handleHome(ctx: ReplContext, arg: string): Promise<HandlerResult | void> {
+  if (arg === "clear") {
+    ctx.state.homeUrl = "";
+    saveConfig({ homeUrl: "" });
+    render.success("home URL cleared");
+    ctx.logCommand("/home clear");
+    return;
+  }
+  if (arg) {
+    // /home set <url> or /home <url>
+    let url = arg.replace(/^set\s+/, "");
+    if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(url)) {
+      url = `https://${url}`;
+    }
+    ctx.state.homeUrl = url;
+    saveConfig({ homeUrl: url });
+    render.success(`home URL set to ${url}`);
+    ctx.logCommand(`/home ${arg}`);
+    return;
+  }
+  if (ctx.state.homeUrl) {
+    render.status(`navigating to ${ctx.state.homeUrl}...`);
+    const homeHostname = new URL(ctx.state.homeUrl).hostname;
+    await ctx.navigateAndProcess(ctx.state.homeUrl, "goto", {
+      preNavigate: () => {
+        ctx.state.goalContext = { baseGoal: `browsing ${homeHostname}`, activeIntent: "", breadcrumb: [] };
+      },
+    });
+    ctx.logCommand("/home");
+    return;
+  }
+  // No home URL set — prompt user
+  const answer = await new Promise<string>((resolve) => {
+    ctx.rl.question("  enter home URL (or 'cancel'): ", resolve);
+  });
+  const trimmed = answer.trim();
+  if (!trimmed || trimmed.toLowerCase() === "cancel") {
+    return;
+  }
+  let homeUrl = trimmed;
+  if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(homeUrl)) {
+    homeUrl = `https://${homeUrl}`;
+  }
+  ctx.state.homeUrl = homeUrl;
+  saveConfig({ homeUrl });
+  render.success(`home URL set to ${homeUrl}`);
+  render.status(`navigating to ${homeUrl}...`);
+  const promptHostname = new URL(homeUrl).hostname;
+  await ctx.navigateAndProcess(homeUrl, "goto", {
+    preNavigate: () => {
+      ctx.state.goalContext = { baseGoal: `browsing ${promptHostname}`, activeIntent: "", breadcrumb: [] };
+    },
+  });
+  ctx.logCommand("/home");
+}
+
+// ===================================================================
+// /demo
+// ===================================================================
+
+export async function handleDemo(ctx: ReplContext): Promise<void> {
+  const demoUrl = process.env.BASE_URL || "http://localhost:3000";
+  ctx.state.goalContext = { baseGoal: "check my water bill", activeIntent: "", breadcrumb: [] };
+  render.progress("checking if CityServe is running...");
+  const serverReady = await ctx.ensureCityServe();
+  if (!serverReady) {
+    render.progressDone();
+    render.error("could not start CityServe — try running `npm run cityserve` in another terminal");
+    return;
+  }
+  render.progressDone();
+  render.status(`starting CityServe demo at ${demoUrl}...`);
+  await ctx.navigateAndProcess(demoUrl, "goto");
+  ctx.logCommand("/demo");
+}

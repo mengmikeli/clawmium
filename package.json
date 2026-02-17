@@ -17,6 +17,7 @@
     "test:session": "tsx src/__test__session.ts",
     "test:stash-eval": "tsx src/__test__stash_eval.ts",
     "test:auto": "tsx src/__test__auto.ts",
+    "test:repl": "tsx src/__test__repl.ts",
     "clm": "tsx src/index.ts"
   },
   "keywords": [],
