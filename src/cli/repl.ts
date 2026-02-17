@@ -1,4 +1,7 @@
 import * as readline from "readline";
+import { ChildProcess, spawn } from "child_process";
+import * as path from "path";
+import * as http from "http";
 import { BrowserEngine } from "../browser/engine";
 import { PageNavigator, PageContent } from "../browser/navigator";
 import { NetworkInterceptor } from "../browser/network";
@@ -77,6 +80,7 @@ export class Repl {
   private muteInterceptor = false;
   private closingForAuth = false;
   private shuttingDown = false;
+  private cityserveProcess: ChildProcess | null = null;
   private abortController: AbortController | null = null;
   private crawlManager = new CrawlManager();
   private autoSaveTimer: ReturnType<typeof setInterval> | null = null;
@@ -900,6 +904,15 @@ export class Repl {
         case "demo": {
           const demoUrl = process.env.BASE_URL || "http://localhost:3000";
           this.state.goalContext = { baseGoal: "check my water bill", activeIntent: "", breadcrumb: [] };
+          render.progress("checking if CityServe is running...");
+          const serverReady = await this.ensureCityServe();
+          if (!serverReady) {
+            render.progressDone();
+            render.error("could not start CityServe — try running `npm run cityserve` in another terminal");
+            this.rl.prompt();
+            return;
+          }
+          render.progressDone();
           render.status(`starting CityServe demo at ${demoUrl}...`);
           await this.syncBrowser();
           this.crawlManager.truncateCursorForward();
@@ -1749,7 +1762,7 @@ export class Repl {
 
   private findRelevantApiData(): unknown | null {
     const responses = this.interceptor.getResponses();
-    const skipPatterns = ["/api/login", "/api/session", "/api/services", "/api/logout", "/api/account"];
+    const skipPatterns = ["/api/login", "/api/session", "/api/services", "/api/logout", "/api/account", "/api/report-categories"];
     for (let i = responses.length - 1; i >= 0; i--) {
       const resp = responses[i];
       // Only consider /api/ routes — non-api JSON is for content extraction
@@ -2037,6 +2050,64 @@ export class Repl {
     this.startReadline();
   }
 
+  private async ensureCityServe(): Promise<boolean> {
+    // Probe port first — if server is already running, skip spawn
+    const isUp = await new Promise<boolean>((resolve) => {
+      const req = http.get("http://localhost:3000/api/services", { timeout: 2000 }, (res) => {
+        res.resume(); // drain
+        resolve(res.statusCode !== undefined && res.statusCode < 500);
+      });
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => { req.destroy(); resolve(false); });
+    });
+    if (isUp) return true;
+
+    // Spawn CityServe
+    const projectRoot = path.resolve(__dirname, "..", "..");
+    const child = spawn("npx", ["tsx", "cityserve/server.ts"], {
+      cwd: projectRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+    });
+
+    // Wait for "CityServe running" on stdout (up to 10s)
+    const ready = await new Promise<boolean>((resolve) => {
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) { resolved = true; child.kill(); resolve(false); }
+      }, 10_000);
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        if (!resolved && chunk.toString().includes("CityServe running")) {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve(true);
+        }
+      });
+
+      child.on("error", () => {
+        if (!resolved) { resolved = true; clearTimeout(timeout); resolve(false); }
+      });
+
+      child.on("exit", () => {
+        if (!resolved) { resolved = true; clearTimeout(timeout); resolve(false); }
+      });
+    });
+
+    if (ready) {
+      this.cityserveProcess = child;
+      child.on("exit", (code) => {
+        if (this.cityserveProcess === child) {
+          render.status(`CityServe exited unexpectedly (code ${code})`);
+          this.cityserveProcess = null;
+        }
+      });
+      return true;
+    }
+
+    return false;
+  }
+
   private async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
@@ -2052,6 +2123,10 @@ export class Repl {
       saveConfig({ ...config, lastSessionId: this.crawlManager.activeCrawl.id });
     }
     render.status("session ended. browser closed.");
+    if (this.cityserveProcess) {
+      this.cityserveProcess.kill();
+      this.cityserveProcess = null;
+    }
     await this.engine.close();
     this.rl.close();
     process.exit(0);
