@@ -418,6 +418,164 @@ async function main() {
   console.log();
 
   // ---------------------------------------------------------------
+  // GROUP 6: Stash operations (7 tests)
+  // ---------------------------------------------------------------
+  console.log("--- Stash operations ---\n");
+
+  console.log("19. pushStash/popStash — round-trip preserves nodes and cursor...");
+  {
+    const m = new CrawlManager();
+    m.createCrawl("https://hn.com", "HN", "goto");
+    const rootId = m.currentNodeId!;
+    const article = m.addNavigation("https://hn.com/item/1", "Article 1", "choice");
+    m.appendCursor(rootId, "goto");
+    m.appendCursor(article.id, "choice");
+    const crawlId = m.activeCrawl!.id;
+    const crawlName = m.activeCrawl!.name;
+
+    // Push onto stash
+    const pushed = m.pushStash();
+    assert(pushed === true, "pushStash returns true");
+    assert(m.activeCrawl === null, "active crawl is null after push");
+    assert(m.nodes.size === 0, "nodes empty after push");
+    assert(m.cursorHistory.length === 0, "cursor empty after push");
+    assert(m.stash.length === 1, "stash has 1 entry");
+
+    // Pop back
+    const restored = m.popStash();
+    assert(restored !== null, "popStash returns crawl");
+    assert(restored!.id === crawlId, "restored crawl ID matches");
+    assert(restored!.name === crawlName, "restored crawl name matches");
+    assert(m.nodes.size === 2, "nodes restored (2)");
+    assert(m.cursorHistory.length === 2, "cursor restored (2 entries)");
+    assert(m.cursorIndex === 1, "cursorIndex restored");
+    assert(m.currentNodeId === article.id, "currentNodeId restored");
+    assert(m.stash.length === 0, "stash empty after pop");
+  }
+  console.log();
+
+  console.log("20. stash cap at 10 — oldest entry dropped...");
+  {
+    const m = new CrawlManager();
+    for (let i = 0; i < 12; i++) {
+      m.createCrawl(`https://site${i}.com`, `Site ${i}`, "goto");
+      m.appendCursor(m.currentNodeId!, "goto");
+      m.pushStash();
+    }
+    assert(m.stash.length === 10, `stash capped at 10 (got ${m.stash.length})`);
+    // The oldest two (site0, site1) should be dropped
+    const firstStashedNode = m.stash[0].nodes.values().next().value as CrawlNode | undefined;
+    assert(firstStashedNode?.url === "https://site2.com",
+      "oldest stash entry is site2 (0 and 1 dropped)");
+  }
+  console.log();
+
+  console.log("21. clear() clears stash, clearActive() preserves stash...");
+  {
+    const m = new CrawlManager();
+    m.createCrawl("https://a.com", "A", "goto");
+    m.pushStash();
+    m.createCrawl("https://b.com", "B", "goto");
+    m.pushStash();
+    m.createCrawl("https://c.com", "C", "goto");
+    assert(m.stash.length === 2, "2 stashed crawls");
+
+    // clearActive preserves stash
+    m.clearActive();
+    assert(m.activeCrawl === null, "active crawl cleared");
+    assert(m.stash.length === 2, "stash preserved after clearActive");
+
+    // clear() clears everything
+    m.clear();
+    assert(m.stash.length === 0, "stash cleared after clear()");
+  }
+  console.log();
+
+  console.log("22. getFullCursorHistory — combines stash + active...");
+  {
+    const m = new CrawlManager();
+    // First crawl: 2 pages
+    m.createCrawl("https://a.com", "A", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
+    const a2 = m.addNavigation("https://a.com/page2", "A2", "choice");
+    m.appendCursor(a2.id, "choice");
+    m.pushStash();
+
+    // Second crawl: 1 page
+    m.createCrawl("https://b.com", "B", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
+
+    const full = m.getFullCursorHistory();
+    assert(full.length === 3, `full history has 3 entries (got ${full.length})`);
+    assert(full[0].stashIndex === 0, "first entry from stash (index 0)");
+    assert(full[1].stashIndex === 0, "second entry from stash (index 0)");
+    assert(full[2].stashIndex === -1, "third entry from active crawl");
+    assert(full[0].crawlName !== undefined, "stash entries have crawlName");
+  }
+  console.log();
+
+  console.log("23. getNodeAcrossStash — finds nodes in stash and active...");
+  {
+    const m = new CrawlManager();
+    m.createCrawl("https://stashed.com", "Stashed", "goto");
+    const stashedNodeId = m.currentNodeId!;
+    m.pushStash();
+
+    m.createCrawl("https://active.com", "Active", "goto");
+    const activeNodeId = m.currentNodeId!;
+
+    const fromActive = m.getNodeAcrossStash(activeNodeId);
+    assert(fromActive !== null, "found node in active crawl");
+    assert(fromActive!.url === "https://active.com", "correct active node");
+
+    const fromStash = m.getNodeAcrossStash(stashedNodeId);
+    assert(fromStash !== null, "found node in stash");
+    assert(fromStash!.url === "https://stashed.com", "correct stashed node");
+
+    const missing = m.getNodeAcrossStash("nonexistent");
+    assert(missing === null, "returns null for missing node");
+  }
+  console.log();
+
+  console.log("24. multiple push/pop — LIFO ordering...");
+  {
+    const m = new CrawlManager();
+    m.createCrawl("https://first.com", "First", "goto");
+    m.pushStash();
+    m.createCrawl("https://second.com", "Second", "goto");
+    m.pushStash();
+    m.createCrawl("https://third.com", "Third", "goto");
+    m.pushStash();
+
+    assert(m.stash.length === 3, "3 stashed");
+    const popped1 = m.popStash();
+    assert(popped1 !== null, "pop 1 returns crawl");
+    // Check the restored node URL
+    assert(m.findNodeByUrl("https://third.com") !== null, "third popped first (LIFO)");
+
+    const popped2 = m.popStash();
+    assert(popped2 !== null, "pop 2 returns crawl");
+    assert(m.findNodeByUrl("https://second.com") !== null, "second popped second");
+
+    const popped3 = m.popStash();
+    assert(popped3 !== null, "pop 3 returns crawl");
+    assert(m.findNodeByUrl("https://first.com") !== null, "first popped third");
+
+    const popped4 = m.popStash();
+    assert(popped4 === null, "pop 4 returns null (empty stash)");
+  }
+  console.log();
+
+  console.log("25. pushStash with no active crawl returns false...");
+  {
+    const m = new CrawlManager();
+    const result = m.pushStash();
+    assert(result === false, "pushStash returns false with no active crawl");
+    assert(m.stash.length === 0, "stash still empty");
+  }
+  console.log();
+
+  // ---------------------------------------------------------------
   // Cleanup
   // ---------------------------------------------------------------
   cleanup();

@@ -12,6 +12,50 @@ export function status(msg: string): void {
   console.log(`${DIM}→ ${msg}${RESET}`);
 }
 
+export function progress(msg: string): void {
+  process.stdout.write(`\r${DIM}⋯ ${msg}${RESET}\x1b[K`);
+}
+
+export function progressDone(): void {
+  process.stdout.write(`\r\x1b[K`);
+}
+
+export function navSummary(title: string, summary: string, url?: string): void {
+  const innerWidth = 72;
+
+  console.log();
+  console.log(`  ${BOLD}${title}${RESET}`);
+  if (summary) {
+    // Word-wrap summary at innerWidth chars, indented 2 spaces
+    const lines: string[] = [];
+    for (const paragraph of summary.split("\n")) {
+      const words = paragraph.split(/\s+/);
+      let line = "";
+      for (const word of words) {
+        if (line.length + word.length + 1 > innerWidth) {
+          lines.push(line);
+          line = word;
+        } else {
+          line = line ? `${line} ${word}` : word;
+        }
+      }
+      if (line) lines.push(line);
+    }
+    for (const line of lines) {
+      console.log(`  ${WHITE}${line}${RESET}`);
+    }
+  }
+  if (url) {
+    try {
+      const hostname = new URL(url).hostname;
+      console.log(`  ${DIM}${hostname}${RESET}`);
+    } catch {
+      console.log(`  ${DIM}${url}${RESET}`);
+    }
+  }
+  console.log();
+}
+
 export function success(msg: string): void {
   console.log(`${GREEN}✓ ${msg}${RESET}`);
 }
@@ -93,7 +137,8 @@ export function help(): void {
   console.log(`  ${CYAN}/login${RESET}         Log in to current site`);
   console.log(`  ${CYAN}/save${RESET}          Save data to disk`);
   console.log(`  ${CYAN}/url${RESET}           Show current URL`);
-  console.log(`  ${CYAN}/stack${RESET}         Show URL stack and sync status`);
+  console.log(`  ${CYAN}/stack${RESET}         Show navigation stack`);
+  console.log(`  ${CYAN}/history${RESET}       Show visit history (/history N to jump)`);
   console.log(`  ${CYAN}/tree${RESET}          Show crawl navigation tree`);
   console.log(`  ${CYAN}/crawl${RESET}         Manage crawls (list, load, rename, end, info)`);
   console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
@@ -256,5 +301,183 @@ export function crawlInfo(name: string, created: number, nodeCount: number, root
     console.log(`  │ ${BOLD}${key}:${RESET}  ${value}${padding} │`);
   }
   console.log(`  └${"─".repeat(innerWidth + 2)}┘`);
+  console.log();
+}
+
+// ---------------------------------------------------------------
+// Private helpers for history/stack display
+// ---------------------------------------------------------------
+
+function formatRelativeTime(timestamp: number): string {
+  const diff = Math.max(0, Date.now() - timestamp);
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function truncateUrl(url: string, maxLen = 50): string {
+  if (url.length <= maxLen) return url;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    const path = parsed.pathname;
+    const available = maxLen - host.length - 3; // 3 for "..."
+    if (available <= 0) return host.slice(0, maxLen - 3) + "...";
+    // Show hostname + tail of path
+    if (path.length <= available) return `${host}${path}`;
+    return `${host}...${path.slice(-(available))}`;
+  } catch {
+    return url.slice(0, maxLen - 3) + "...";
+  }
+}
+
+// ---------------------------------------------------------------
+// History display
+// ---------------------------------------------------------------
+
+export interface HistoryEntry {
+  index: number;
+  title: string;
+  url: string;
+  reachedBy: string;
+  timestamp: number;
+  summary?: string;
+  isCurrent: boolean;
+  crawlName?: string;
+}
+
+const reachedByIcon: Record<string, string> = {
+  choice: "↗",
+  goto: "⇒",
+  back: "←",
+  forward: "→",
+  auto: "·",
+  history: "⏎",
+};
+
+export function historyList(entries: HistoryEntry[]): void {
+  console.log();
+  console.log(`  ${BOLD}Visit history (${entries.length} page${entries.length !== 1 ? "s" : ""})${RESET}`);
+  console.log();
+
+  // Show last 30 entries, with overflow indicator
+  const maxShow = 30;
+  const startIdx = Math.max(0, entries.length - maxShow);
+  if (startIdx > 0) {
+    console.log(`  ${DIM}... ${startIdx} earlier entr${startIdx !== 1 ? "ies" : "y"} ...${RESET}`);
+  }
+
+  const shown = entries.slice(startIdx);
+  let lastCrawlName: string | undefined;
+  for (const entry of shown) {
+    // Crawl boundary separator
+    if (entry.crawlName && entry.crawlName !== lastCrawlName) {
+      if (lastCrawlName !== undefined) {
+        console.log(`  ${DIM}${"─".repeat(52)}${RESET}`);
+      }
+      console.log(`  ${DIM}▸ ${entry.crawlName}${RESET}`);
+      lastCrawlName = entry.crawlName;
+    }
+
+    const icon = reachedByIcon[entry.reachedBy] || "·";
+    const time = formatRelativeTime(entry.timestamp);
+    const prefix = entry.isCurrent ? `${CYAN}→${RESET}` : " ";
+    const titleStr = entry.isCurrent
+      ? `${BOLD}${WHITE}${entry.title}${RESET}`
+      : entry.title;
+
+    // Pad between title and time
+    const titleVisible = entry.title;
+    const timeCol = 52;
+    const gap = Math.max(1, timeCol - titleVisible.length - 6); // 6 = "[N] i "
+    const padding = " ".repeat(gap);
+
+    console.log(`  ${prefix} ${CYAN}[${entry.index}]${RESET} ${icon} ${titleStr}${padding}${DIM}${time}${RESET}`);
+
+    // Show summary as dim second line if available
+    if (entry.summary) {
+      const truncated = entry.summary.length > 60
+        ? entry.summary.slice(0, 57) + "..."
+        : entry.summary;
+      console.log(`         ${DIM}${truncated}${RESET}`);
+    }
+  }
+  console.log();
+}
+
+// ---------------------------------------------------------------
+// Stack display
+// ---------------------------------------------------------------
+
+export interface StackEntry {
+  url: string;
+  title: string;
+}
+
+export function stackView(
+  current: StackEntry,
+  browserUrl: string,
+  synced: boolean,
+  backStack: StackEntry[],
+  forwardStack: StackEntry[],
+): void {
+  console.log();
+  console.log(`  ${BOLD}Navigation stack${RESET}`);
+  console.log();
+
+  // Current position
+  console.log(`  ${CYAN}→${RESET} ${BOLD}${WHITE}${current.title || "(untitled)"}${RESET}`);
+  console.log(`    ${DIM}${current.url || "(no URL)"}${RESET}`);
+  console.log();
+
+  // Browser sync status
+  if (synced) {
+    console.log(`  ${DIM}browser: synced${RESET}`);
+  } else {
+    console.log(`  ${YELLOW}browser: not synced${RESET} ${DIM}(${truncateUrl(browserUrl)})${RESET}`);
+  }
+  console.log();
+
+  // Back stack (most recent first)
+  console.log(`  ${DIM}← Back (${backStack.length}):${RESET}`);
+  if (backStack.length === 0) {
+    console.log(`    ${DIM}(empty)${RESET}`);
+  } else {
+    const reversed = [...backStack].reverse();
+    for (const entry of reversed) {
+      let host: string;
+      try { host = new URL(entry.url).hostname; } catch { host = entry.url; }
+      console.log(`    ${DIM}←${RESET} ${entry.title || "(untitled)"}  ${DIM}${host}${RESET}`);
+    }
+  }
+  console.log();
+
+  // Forward stack
+  console.log(`  ${DIM}→ Forward (${forwardStack.length}):${RESET}`);
+  if (forwardStack.length === 0) {
+    console.log(`    ${DIM}(empty)${RESET}`);
+  } else {
+    for (const entry of forwardStack) {
+      let host: string;
+      try { host = new URL(entry.url).hostname; } catch { host = entry.url; }
+      console.log(`    ${DIM}→${RESET} ${entry.title || "(untitled)"}  ${DIM}${host}${RESET}`);
+    }
+  }
+  console.log();
+}
+
+export function stashIndicator(depth: number, names: string[]): void {
+  if (depth === 0) return;
+  console.log(`  ${DIM}Stash (${depth} crawl${depth !== 1 ? "s" : ""}):${RESET}`);
+  for (let i = names.length - 1; i >= 0; i--) {
+    console.log(`    ${DIM}▸${RESET} ${names[i]}`);
+  }
+  console.log(`  ${DIM}(/back at start of crawl pops the stash)${RESET}`);
   console.log();
 }

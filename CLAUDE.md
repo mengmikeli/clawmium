@@ -65,10 +65,10 @@ clawmium/
 │   │   └── goals.ts         # Pure functions: formatGoal(), addBreadcrumb()
 │   ├── output/
 │   │   └── writer.ts        # Save data + session logs to ~/clm/{site}/
-│   ├── __test__crawl.ts         # Crawl tree + persistence (113 assertions)
+│   ├── __test__crawl.ts         # Crawl tree + persistence + stash (152 assertions)
 │   ├── __test__crawl_llm.ts     # Crawl LLM integration (48 assertions)
 │   ├── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
-│   └── __test__session.ts       # Session persistence — cursor, metadata, save/load round-trip (118 assertions)
+│   └── __test__session.ts       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
 │
 ├── cityserve/               # Mock government website (CityServe)
 │   ├── server.ts            # Express server
@@ -89,6 +89,7 @@ clawmium/
     ├── 2026-02-16-3.md      # Crawl Phase 4 — command layer, enriched display, session log persistence
     ├── 2026-02-17-0.md      # Session persistence + main view polish — trail representations compound
     ├── 2026-02-17-1.md      # Meta-learnings — five principles from the Feb 16-17 sprint
+    ├── 2026-02-17-2.md      # Session, crawl, memory — three layers of browsing state
     └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
@@ -211,15 +212,17 @@ interface SessionState {
 
 **Cursor history** (replaces pageStack/forwardStack/visitHistory): The crawl tree now owns all navigation state. `CrawlManager.cursorHistory` is a linear `CursorEntry[]` log of node visits; `cursorIndex` tracks the current position for back/forward. `/back` decrements the index, `/forward` increments it, `/history N` jumps to an entry. New navigation truncates forward entries (same as browser behavior). Capped at 200 entries.
 
+**Crawl stash**: When `/goto` navigates to an external domain, the active crawl is **stashed** (pushed onto `CrawlManager.stash: StashedCrawl[]`) instead of destroyed. `/back` at the start of a new crawl pops the stash. `/history` shows combined entries across stash + active crawl. Capped at 10 stashed crawls. `/clear crawl` clears everything including stash. `/crawl end` clears active only, preserves stash. Session persistence (`SessionEnvelope` v3) serializes the full stash for resume.
+
 Key state behaviors:
 - **REPL owns position**: `state.currentUrl` is set after every `nav.goto()`, never read from `page.url()`. All operations, `inferResource()`, `currentSite()`, and anchor detection use `currentUrl`.
 - **Crawl node as source of truth**: `PageInterpretation` and `GoalContext` are stored on `CrawlNode.metadata` via `storeStateOnNode()`. `/back` and `/forward` restore from the node (no separate snapshot copies). URL-deduplicated nodes get their metadata overwritten on revisit — the node always has the *latest* interpretation.
-- **Goal reset**: `/goto` to external URL resets `GoalContext` — `baseGoal` becomes `"browsing {hostname}"`, `activeIntent` cleared, `breadcrumb` reset. Relative paths keep current goal context.
+- **Goal reset**: `/goto` to external URL stashes the current crawl and resets `GoalContext` — `baseGoal` becomes `"browsing {hostname}"`, `activeIntent` cleared, `breadcrumb` reset. Relative paths keep current goal context.
 - **Previous interpretation**: When LLM produces new choices, old ones preserved. If user enters a number matching old choices, asks "did you mean [N] label? (y/n)"
 - **Conversation context**: Free-text follow-ups pass `"Previous summary: ...\nUser asks: ..."` to the LLM so it answers the question rather than re-describing the page.
 - **Form detection**: `detectInteractiveForms(page)` runs on each page load. Detected forms become fill choices via `appendSystemChoices()`, deduped by `inputSelector` against LLM-generated fill choices. Ordering: LLM choices → detected forms → login.
 - **Home URL persistence**: `homeUrl` saved to disk via `saveConfig()` on `/home set`, restored on startup. Used as default start URL when no explicit URL is given.
-- **Session persistence**: On shutdown and periodically (60s), a `.session.json` sidecar is written alongside the crawl markdown. Contains full `SessionEnvelope`: crawl tree with interpretations, cursor history, REPL state, conversation history. On startup, if a recent session exists (< 7 days), user is prompted to resume. `--new` flag bypasses the prompt.
+- **Session persistence**: On shutdown and periodically (60s), a `.session.json` sidecar is written alongside the crawl markdown. Contains full `SessionEnvelope` v3: crawl tree with interpretations, cursor history, stash, REPL state, conversation history. On startup, if a recent session exists (< 7 days), user is prompted to resume. `--new` flag bypasses the prompt.
 - **Auto-save**: `setInterval(autoSave, 60_000)` writes `.session.json` only (lightweight). Cleared on shutdown.
 
 Guard flags:
@@ -237,6 +240,7 @@ Every navigation is recorded as a node in a tree. The tree persists to markdown 
 - Deduplicates by URL — navigating to an already-visited URL moves the cursor without creating a new node
 - `getDisplayTree()` returns plain text tree for markdown persistence; `getEnrichedDisplayTree()` adds ANSI colors, current-node marker (`→`), reachedBy icons, and inline summaries
 - **Cursor history**: `cursorHistory: CursorEntry[]` + `cursorIndex: number` — linear visit log with back/forward navigation. Replaces the old `pageStack`/`forwardStack`/`visitHistory` arrays on SessionState. Methods: `appendCursor()`, `cursorBack()`, `cursorForward()`, `cursorJump()`, `truncateCursorForward()`, `resetCursor()`
+- **Crawl stash**: `stash: StashedCrawl[]` — stack of previous crawls preserved across domain changes. `pushStash()` moves active crawl onto stash (O(1), reference move). `popStash()` restores most recent. `clearActive()` clears active only (stash preserved). `clear()` clears everything including stash. `getFullCursorHistory()` returns combined `FullCursorEntry[]` across stash + active. `getNodeAcrossStash()` finds nodes in any crawl. Capped at 10 entries (oldest dropped).
 
 **Node metadata**: After each `interpret()` call, `storeStateOnNode()` populates the current node's `metadata.summary`, `metadata.interpretation` (full `PageInterpretation`), `metadata.goalContext`, and `metadata.conversationSnippets`. Interpretation and goal context enable full state restoration on `/back`, `/forward`, `/history`, and session resume.
 
@@ -246,7 +250,7 @@ Every navigation is recorded as a node in a tree. The tree persists to markdown 
 
 **Persistence** (`src/crawl/persistence.ts`): Crawls saved as markdown at `~/clm/crawls/{id}.md`. Format has three sections: `## Tree` (ASCII tree), `## Nodes` (one `### heading` per node with URL/timestamp/summary), `## Session Log` (timestamped log entries filtered to crawl's time range). `peekCrawl()` reads header-only for listing without full parse. `loadCrawl()` tries `.session.json` first (full restore with interpretations, cursor, goal context), falls back to `.md` (tree-only).
 
-**Session persistence** (`src/session/persistence.ts`): `SessionEnvelope` captures the full session state as JSON. Saved as `{crawl-id}.session.json` alongside the markdown file. Contains serialized crawl tree (with interpretations and goal context on each node), cursor history, REPL state (URL, site, goal, conversation history), and session log. `findLastSession()` scans for the most recent sidecar within a configurable age window.
+**Session persistence** (`src/session/persistence.ts`): `SessionEnvelope` (v3) captures the full session state as JSON. Saved as `{crawl-id}.session.json` alongside the markdown file. Contains serialized crawl tree (with interpretations and goal context on each node), cursor history, stash (array of serialized crawls), REPL state (URL, site, goal, conversation history), and session log. `findLastSession()` scans for the most recent sidecar within a configurable age window. Backward-compatible with v2 envelopes (backfills empty stash).
 
 **`pendingReachedBy` pattern**: The REPL sets `state.pendingReachedBy` before navigation (e.g., "choice", "goto"). `trackNavigation()` consumes it after the page loads to record how the user reached the new page. This decouples navigation intent from navigation execution.
 
@@ -365,10 +369,10 @@ npm run test:browser       # Browser integration (needs CityServe running)
 npm run test:llm           # LLM provider test
 npm run test:phase5        # Form detection, HN, goals, appendSystemChoices (91 assertions)
 npm run test:recover       # Browser crash recovery (14 tests)
-npm run test:crawl         # Crawl tree + persistence (113 assertions)
+npm run test:crawl         # Crawl tree + persistence + stash (152 assertions)
 npm run test:crawl-llm     # Crawl LLM integration (48 assertions)
 npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
-npm run test:session       # Session persistence — cursor, metadata, save/load (118 assertions)
+npm run test:session       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
 ```
 
 ## File Output
@@ -439,3 +443,4 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **`/history` command + `/stack` polish (2026-02-16)** — Flat `VisitEntry[]` on SessionState records every page transition (no dedup). `/history` displays chronological list enriched with crawl tree summaries and reachedBy icons. `/history N` jumps to an entry (pushes current to back stack, restores snapshot). `/stack` upgraded from raw `console.log` to polished ANSI display with titles, sync status, and structured back/forward stacks. `ReachedBy` extended with `"history"` + `⏎` icon. Capped at 200 entries.
 - **Session persistence — crawl node as source of truth (2026-02-16)** — Six-phase refactor: (1) Enriched `CrawlNode.metadata` with `interpretation` and `goalContext`. (2) Added `cursorHistory[]` + `cursorIndex` to CrawlManager, replacing `pageStack`/`forwardStack`/`visitHistory` on SessionState. (3) Rewrote `/back`, `/forward`, `/history`, `/stack` to use cursor; `restoreFromNode()` replaces `restoreSnapshot()`. (4) New `src/session/persistence.ts` — `SessionEnvelope` JSON sidecar written alongside crawl markdown, enabling full session round-trip. `loadCrawl()` prefers JSON over markdown. (5) Auto-resume on startup: finds last session < 7 days, prompts to resume. `--new` flag bypasses. (6) Periodic auto-save (60s). New test suite: `__test__session.ts` with 118 assertions.
 - **Main view polish + configurable max_tokens (2026-02-17)** — Three problems fixed: (1) Noisy cascade of dim status lines during page load replaced with single overwriting `render.progress()` line + `render.progressDone()`. (2) Navigation page summaries (previously dim `render.status()`, invisible) now use `render.navSummary()` — bold title, word-wrapped white text, dim hostname. (3) `max_tokens` for interpret raised from 1024→2048 default, all three LLM methods (`interpret`/`planAction`/`extractData`) configurable via `MAX_TOKENS_INTERPRET`/`MAX_TOKENS_PLAN`/`MAX_TOKENS_EXTRACT` env vars. Both providers use shared `tokenLimit()` helper. Prompt updated: content pages get 3-6 sentence summaries, navigation 1-3 sentences. `suggestCommands()` now context-aware (checks cursor position, login, forms, extracted data). 6 files changed, 0 test regressions (401 assertions across 5 suites).
+- **Crawl stash — cross-domain navigation history (2026-02-17)** — Cross-domain `/goto` was destroying in-session navigation history. Fix: instead of `clearCrawl()` on external navigation, `stashCrawl()` pushes the active crawl onto `CrawlManager.stash: StashedCrawl[]`. `/back` at start of new crawl pops the stash. `/history` shows unified history across all stashed + active crawls via `getFullCursorHistory()`. `/stack` shows stash indicator. `SessionEnvelope` bumped to v3 with `stash: SerializedStashedCrawl[]` (backward-compatible with v2). `/crawl end` uses `clearActive()` (preserves stash), `/crawl load` stashes current crawl. `/clear crawl` still clears everything. Stash capped at 10 entries. New types: `StashedCrawl`, `FullCursorEntry`. 6 files changed, 0 test regressions (380 assertions across 4 suites).

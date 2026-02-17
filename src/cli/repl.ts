@@ -10,10 +10,11 @@ import { isHNItemPage, extractHNComments, formatHNPageForLLM } from "../sites/hn
 import { formatGoal, addBreadcrumb, formatGoalWithCrawl } from "./goals";
 import * as render from "./renderer";
 import { saveData, saveSessionLog, loadConfig, saveConfig } from "../output/writer";
-import { CrawlManager, ReachedBy } from "../crawl/tree";
+import { CrawlManager, CrawlNode, ReachedBy, FullCursorEntry } from "../crawl/tree";
 import { saveCrawl, loadCrawl, listCrawls, peekCrawl } from "../crawl/persistence";
 import { deriveCrawlName } from "../crawl/namer";
 import { formatAncestorContext } from "../crawl/context";
+import { saveSession, restoreManagerFromEnvelope, SessionEnvelope } from "../session/persistence";
 
 const LLM_TIMEOUT = 30_000; // 30s timeout for LLM calls
 
@@ -26,13 +27,6 @@ class CancelledError extends Error {
   constructor() { super("cancelled"); }
 }
 
-interface PageSnapshot {
-  url: string;
-  pageTitle: string;
-  interpretation: PageInterpretation;
-  goalContext: GoalContext;
-}
-
 interface SessionState {
   goalContext: GoalContext;
   currentInterpretation: PageInterpretation | null;
@@ -42,12 +36,10 @@ interface SessionState {
   history: Array<{ role: "user" | "agent"; content: string }>;
   log: Array<{ role: string; content: string; timestamp: number }>;
   site: string;
-  pageStack: PageSnapshot[];
-  forwardStack: PageSnapshot[];
   loginAvailable: boolean;
   detectedForms: DetectedForm[];
   homeUrl: string;
-  currentUrl: string;  // REPL stack's current page URL — source of truth
+  currentUrl: string;  // REPL's current page URL — source of truth
   pendingReachedBy: ReachedBy;
 }
 
@@ -85,6 +77,7 @@ export class Repl {
   private shuttingDown = false;
   private abortController: AbortController | null = null;
   private crawlManager = new CrawlManager();
+  private autoSaveTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(engine: BrowserEngine, llm: LLMProvider, userGoal: string, site: string) {
     this.engine = engine;
@@ -100,8 +93,6 @@ export class Repl {
       history: [{ role: "user", content: userGoal }],
       log: [{ role: "user", content: userGoal, timestamp: Date.now() }],
       site,
-      pageStack: [],
-      forwardStack: [],
       loginAvailable: false,
       detectedForms: [],
       homeUrl: config.homeUrl || "",
@@ -160,6 +151,14 @@ export class Repl {
       output: process.stdout,
       prompt: render.promptString(),
     });
+
+    // Periodic auto-save (every 60s, session JSON only — lightweight)
+    if (this.autoSaveTimer) clearInterval(this.autoSaveTimer);
+    this.autoSaveTimer = setInterval(() => {
+      if (this.crawlManager.activeCrawl) {
+        try { this.saveSessionSidecar(); } catch { /* silent */ }
+      }
+    }, 60_000);
 
     // Handle Ctrl+C: first cancels operation, second exits
     let lastSigint = 0;
@@ -237,7 +236,8 @@ export class Repl {
 
   private trackNavigation(url: string, title: string, reachedBy: ReachedBy): void {
     if (!url || url === "about:blank") return;
-    this.crawlManager.addNavigation(url, title, reachedBy);
+    const node = this.crawlManager.addNavigation(url, title, reachedBy);
+    this.crawlManager.appendCursor(node.id, reachedBy);
   }
 
   /**
@@ -367,7 +367,7 @@ export class Repl {
         this.state.lastPageTitle = hnItem.title;
         this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
         this.state.pendingReachedBy = "auto";
-        render.status(`page loaded: "${hnItem.title}"`);
+        render.progress(`loading "${hnItem.title}"...`);
         this.logAgent(`HN discussion: "${hnItem.title}" (${hnItem.commentCount} comments)`);
 
         // Render comment thread in terminal
@@ -375,7 +375,7 @@ export class Repl {
 
         // Send to LLM for summary
         const hnText = formatHNPageForLLM(hnItem);
-        render.status("analyzing discussion...");
+        render.progress("analyzing discussion...");
         const hnAncestorCtx = formatAncestorContext(this.crawlManager);
         const hnConversationCtx = this.state.goalContext.activeIntent || undefined;
         const hnFullCtx = [hnAncestorCtx, hnConversationCtx].filter(Boolean).join("\n\n") || undefined;
@@ -385,8 +385,9 @@ export class Repl {
           "LLM interpret",
           this.signal
         );
+        render.progressDone();
         this.setInterpretation(interpretation);
-        this.storeSummaryOnNode(interpretation.summary);
+        this.storeStateOnNode(interpretation);
         this.maybeNameCrawl(interpretation.summary);
 
         if (interpretation.summary) {
@@ -422,7 +423,7 @@ export class Repl {
     this.state.lastPageTitle = content.title;
     this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
     this.state.pendingReachedBy = "auto";
-    render.status(`page loaded: "${content.title}"`);
+    render.progress(`loading "${content.title}"...`);
     this.logAgent(`Page loaded: "${content.title}" at ${content.url}`);
 
     // Check for intercepted API data relevant to the user's goal
@@ -441,7 +442,7 @@ export class Repl {
     if (visibleTextLen < 500) {
       const richContent = this.interceptor.findRichContent();
       if (richContent) {
-        render.status("content extracted from network data (lazy-load bypass)");
+        render.progress("extracting content...");
         pageText = [
           `Title: ${content.title}`,
           `URL: ${content.url}`,
@@ -454,11 +455,11 @@ export class Repl {
         const reloaded = await this.nav.extractContent();
         if (reloaded.text.trim().length > visibleTextLen) {
           pageText = this.buildPageText(reloaded);
-          render.status("content loaded after scroll");
+          render.progress("loading content...");
         }
       }
     }
-    render.status("analyzing page...");
+    render.progress("analyzing page...");
     const ancestorCtx = formatAncestorContext(this.crawlManager);
     const conversationCtx = this.state.goalContext.activeIntent || undefined;
     const fullCtx = [ancestorCtx, conversationCtx].filter(Boolean).join("\n\n") || undefined;
@@ -468,20 +469,21 @@ export class Repl {
       "LLM interpret",
       this.signal
     );
+    render.progressDone();
     this.setInterpretation(interpretation);
-    this.storeSummaryOnNode(interpretation.summary);
+    this.storeStateOnNode(interpretation);
     this.maybeNameCrawl(interpretation.summary);
 
     // Render based on interpretation
     if (interpretation.dataFound) {
       await this.extractAndDisplay(JSON.stringify(interpretation.dataFound));
     } else {
-      // Show content summary in a box for content pages, inline for navigation
+      // Show content summary in a box for content pages, navSummary for navigation
       if (interpretation.summary) {
         if (interpretation.pageType === "content") {
           render.contentBox(content.title, interpretation.summary);
         } else {
-          render.status(interpretation.summary);
+          render.navSummary(content.title, interpretation.summary, this.state.currentUrl);
         }
         this.logAgent(interpretation.summary);
       }
@@ -589,7 +591,7 @@ export class Repl {
           }
           // Reset goal and base URL when navigating to an external site
           if (isExternal) {
-            this.clearCrawl();  // auto-save current crawl + start fresh for new domain
+            this.stashCrawl();  // stash current crawl for /back recovery across domains
             this.state.goalContext = { baseGoal: `browsing ${new URL(url).hostname}`, activeIntent: "", breadcrumb: [] };
             const origin = new URL(url).origin;
             this.engine.setBaseUrl(origin);
@@ -597,7 +599,7 @@ export class Repl {
           }
           render.status(`navigating to ${url}...`);
           await this.syncBrowser();
-          this.pushPageState();
+          this.crawlManager.truncateCursorForward();
           this.interceptor.clear();
           this.state.pendingReachedBy = "goto";
           try {
@@ -616,15 +618,42 @@ export class Repl {
         }
 
         case "back": {
-          const backTarget = this.state.pageStack[this.state.pageStack.length - 1];
-          if (backTarget) {
-            // Pure stack mutation — no browser interaction
-            const current = this.captureSnapshot();
-            this.state.pageStack.pop();
-            if (current) this.state.forwardStack.push(current);
-            this.restoreSnapshot(backTarget);
-            this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, "back");
-            render.hint(["/refresh to update content"]);
+          const entry = this.crawlManager.cursorBack();
+          if (entry) {
+            const node = this.crawlManager.getNode(entry.nodeId);
+            if (node) {
+              this.crawlManager.navigateToNode(node.id);
+              this.restoreFromNode(node);
+              render.hint(["/refresh to update content"]);
+            } else {
+              render.warn("node not found in crawl tree");
+            }
+          } else if (this.crawlManager.hasStash()) {
+            // At start of current crawl — pop stash to return to previous domain
+            // Save current small crawl to disk first
+            if (this.crawlManager.activeCrawl) {
+              try {
+                saveCrawl(this.crawlManager, this.state.log);
+                this.saveSessionSidecar();
+              } catch { /* save failed — continue */ }
+            }
+            const restored = this.crawlManager.popStash();
+            if (restored) {
+              const node = this.crawlManager.currentNodeId
+                ? this.crawlManager.getNode(this.crawlManager.currentNodeId)
+                : null;
+              if (node) {
+                // Restore REPL state from the stashed crawl's current node
+                try {
+                  const hostname = new URL(node.url).hostname;
+                  this.state.site = hostname.replace(/^www\./, "").split(".")[0];
+                  this.engine.setBaseUrl(new URL(node.url).origin);
+                } catch { /* invalid URL */ }
+                this.restoreFromNode(node);
+                render.status(`returned to stashed crawl: "${restored.name}"`);
+                render.hint(["/refresh to update content"]);
+              }
+            }
           } else {
             render.warn("no history to go back to");
           }
@@ -634,15 +663,16 @@ export class Repl {
         }
 
         case "forward": {
-          const fwdTarget = this.state.forwardStack[this.state.forwardStack.length - 1];
-          if (fwdTarget) {
-            // Pure stack mutation — no browser interaction
-            const current = this.captureSnapshot();
-            this.state.forwardStack.pop();
-            if (current) this.state.pageStack.push(current);
-            this.restoreSnapshot(fwdTarget);
-            this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, "forward");
-            render.hint(["/refresh to update content"]);
+          const entry = this.crawlManager.cursorForward();
+          if (entry) {
+            const node = this.crawlManager.getNode(entry.nodeId);
+            if (node) {
+              this.crawlManager.navigateToNode(node.id);
+              this.restoreFromNode(node);
+              render.hint(["/refresh to update content"]);
+            } else {
+              render.warn("node not found in crawl tree");
+            }
           } else {
             render.warn("no forward history");
           }
@@ -697,7 +727,7 @@ export class Repl {
             // Navigate to home
             render.status(`navigating to ${this.state.homeUrl}...`);
             await this.syncBrowser();
-            this.pushPageState();
+            this.crawlManager.truncateCursorForward();
             this.interceptor.clear();
             this.state.pendingReachedBy = "goto";
             this.state.goalContext = { baseGoal: `browsing ${new URL(this.state.homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
@@ -732,7 +762,7 @@ export class Repl {
           saveConfig({ homeUrl });          render.success(`home URL set to ${homeUrl}`);
           render.status(`navigating to ${homeUrl}...`);
           await this.syncBrowser();
-          this.pushPageState();
+          this.crawlManager.truncateCursorForward();
           this.interceptor.clear();
           this.state.pendingReachedBy = "goto";
           this.state.goalContext = { baseGoal: `browsing ${new URL(homeUrl).hostname}`, activeIntent: "", breadcrumb: [] };
@@ -765,10 +795,81 @@ export class Repl {
           let browserUrl = "(unknown)";
           try { browserUrl = this.engine.getPage().url(); } catch { /* dead page */ }
           const synced = browserUrl === this.state.currentUrl;
-          console.log(`  current:  ${this.state.currentUrl || "(none)"}`);
-          console.log(`  browser:  ${browserUrl}${synced ? "" : " (not synced)"}`);
-          console.log(`  back:     [${this.state.pageStack.map(s => s.url).join(", ")}]`);
-          console.log(`  forward:  [${this.state.forwardStack.map(s => s.url).join(", ")}]`);
+
+          // Build back/forward stacks from cursor history
+          const cursor = this.crawlManager.getCursorHistory();
+          const cidx = this.crawlManager.cursorIndex;
+          const backEntries: render.StackEntry[] = [];
+          const fwdEntries: render.StackEntry[] = [];
+          for (let i = 0; i < cidx; i++) {
+            const node = this.crawlManager.getNode(cursor[i].nodeId);
+            if (node) backEntries.push({ url: node.url, title: node.title });
+          }
+          for (let i = cidx + 1; i < cursor.length; i++) {
+            const node = this.crawlManager.getNode(cursor[i].nodeId);
+            if (node) fwdEntries.push({ url: node.url, title: node.title });
+          }
+
+          render.stackView(
+            { url: this.state.currentUrl, title: this.state.lastPageTitle },
+            browserUrl,
+            synced,
+            backEntries,
+            fwdEntries,
+          );
+          // Show stash indicator if there are stashed crawls
+          if (this.crawlManager.hasStash()) {
+            const stashNames = this.crawlManager.stash.map(s => s.activeCrawl.name);
+            render.stashIndicator(this.crawlManager.getStashDepth(), stashNames);
+          }
+          this.logCommand("/stack");
+          this.rl.prompt();
+          return;
+        }
+
+        case "history": {
+          if (arg) {
+            // /history N — jump to entry
+            const n = parseInt(arg, 10);
+            if (isNaN(n)) {
+              render.error("usage: /history [N]");
+              this.rl.prompt();
+              return;
+            }
+            await this.jumpToHistory(n);
+            this.logCommand(`/history ${n}`);
+            this.rl.prompt();
+            return;
+          }
+          // /history — show list (combined across stash + active crawl)
+          const fullCursor = this.crawlManager.getFullCursorHistory();
+          if (fullCursor.length === 0) {
+            render.status("no visit history yet — navigate to start recording");
+            this.rl.prompt();
+            return;
+          }
+          // Compute the current entry index in the full history
+          // Active crawl's cursorIndex maps to the last segment of fullCursor
+          const stashEntryCount = fullCursor.length - this.crawlManager.cursorHistory.length;
+          const activeCursorIdx = this.crawlManager.cursorIndex;
+          const fullCurrentIdx = activeCursorIdx >= 0 ? stashEntryCount + activeCursorIdx : -1;
+
+          const histEntries: render.HistoryEntry[] = fullCursor.map((entry, i) => {
+            const node = this.crawlManager.getNodeAcrossStash(entry.nodeId);
+            return {
+              index: i + 1,
+              title: node?.title || "(untitled)",
+              url: node?.url || "",
+              reachedBy: entry.reachedBy,
+              timestamp: entry.timestamp,
+              summary: node?.metadata?.summary,
+              isCurrent: i === fullCurrentIdx,
+              crawlName: (entry as FullCursorEntry).crawlName,
+            };
+          });
+          render.historyList(histEntries);
+          render.hint(["type /history N to jump to an entry"]);
+          this.logCommand("/history");
           this.rl.prompt();
           return;
         }
@@ -784,7 +885,7 @@ export class Repl {
           this.state.goalContext = { baseGoal: "check my water bill", activeIntent: "", breadcrumb: [] };
           render.status(`starting CityServe demo at ${demoUrl}...`);
           await this.syncBrowser();
-          this.pushPageState();
+          this.crawlManager.truncateCursorForward();
           this.interceptor.clear();
           this.state.pendingReachedBy = "goto";
           try {
@@ -879,10 +980,10 @@ export class Repl {
                 return;
               }
 
-              // Auto-save current crawl if active
+              // Stash current crawl if active (preserve history when loading old crawls)
               if (this.crawlManager.activeCrawl) {
-                render.status("auto-saving active crawl...");
-                this.clearCrawl();
+                render.status("stashing active crawl...");
+                this.stashCrawl();
               }
 
               const loaded = loadCrawl(picked.id, this.crawlManager);
@@ -899,6 +1000,16 @@ export class Repl {
               if (currentNode) {
                 this.state.currentUrl = currentNode.url;
                 this.state.lastPageTitle = currentNode.title;
+                // Restore interpretation from node metadata if available
+                if (currentNode.metadata?.interpretation) {
+                  this.setInterpretation(currentNode.metadata.interpretation);
+                }
+                if (currentNode.metadata?.goalContext) {
+                  this.state.goalContext = {
+                    ...currentNode.metadata.goalContext,
+                    breadcrumb: [...(currentNode.metadata.goalContext.breadcrumb || [])],
+                  };
+                }
               }
 
               render.success(`loaded crawl: "${this.crawlManager.activeCrawl?.name || picked.name}"`);
@@ -933,7 +1044,8 @@ export class Repl {
               }
               try {
                 const filepath = saveCrawl(this.crawlManager, this.state.log);
-                this.crawlManager.clear();
+                this.saveSessionSidecar();
+                this.crawlManager.clearActive();  // preserve stash — user can still /back
                 render.success(`crawl saved to: ${filepath}`);
               } catch (err) {
                 render.error(`failed to save crawl: ${(err as Error).message}`);
@@ -997,7 +1109,8 @@ export class Repl {
             items.push("REPL stacks, interpretations, history, log, goal");
           }
           if (scope === "crawl" || scope === "all") {
-            items.push("crawl tree" + (this.crawlManager.activeCrawl ? " (will auto-save first)" : ""));
+            const stashNote = this.crawlManager.hasStash() ? ` + ${this.crawlManager.getStashDepth()} stashed` : "";
+            items.push("crawl tree" + stashNote + (this.crawlManager.activeCrawl ? " (will auto-save first)" : ""));
           }
           if (scope === "browser" || scope === "all") {
             items.push("browser cookies, localStorage, sessionStorage");
@@ -1036,7 +1149,7 @@ export class Repl {
     }
 
     // Command-like input detection — prompt if user typed a bare command name
-    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "tree", "clear", "crawl"];
+    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "history", "tree", "clear", "crawl"];
     const lowerInput = input.toLowerCase();
     if (knownCommands.includes(lowerInput) || knownCommands.some(c => lowerInput.startsWith(c + " "))) {
       const confirmed = await this.confirmAction(`did you mean /${lowerInput}?`);
@@ -1109,7 +1222,7 @@ export class Repl {
               await page.waitForLoadState("networkidle").catch(() => {});
             } catch { /* give up */ }
           }
-          this.pushPageState();
+          this.crawlManager.truncateCursorForward();
           try { this.state.currentUrl = this.nav.currentUrl(); } catch {}
           this.state.goalContext.activeIntent = trimmedQuery;
           if (!this.crawlManager.activeCrawl) {
@@ -1131,13 +1244,13 @@ export class Repl {
           if (choice.url.startsWith("#") || (choice.url.includes("#") && new URL(choice.url).pathname === new URL(this.state.currentUrl).pathname)) {
             render.status("anchor link — staying on current page");
           } else {
-            this.pushPageState();
+            this.crawlManager.truncateCursorForward();
             render.status(`navigating to ${choice.label}...`);
             await this.nav.goto(choice.url);
           }
         } else if (choice.selector) {
           render.status(`navigating to ${choice.label}...`);
-          this.pushPageState();
+          this.crawlManager.truncateCursorForward();
           try {
             // Check if it's an anchor link before clicking
             const href = await this.engine.getPage().getAttribute(choice.selector, "href").catch(() => null);
@@ -1194,7 +1307,7 @@ export class Repl {
     await this.syncBrowser();
     const content = await this.nav.extractContent();
     const pageText = this.buildPageText(content);
-    render.status("thinking...");
+    render.progress("thinking...");
 
     // Build conversation context from previous summary + user question
     let conversationContext: string | undefined;
@@ -1208,6 +1321,7 @@ export class Repl {
       "LLM interpret",
       this.signal
     );
+    render.progressDone();
     this.setInterpretation(interpretation);
 
     // Append conversation snippet to crawl node (don't overwrite summary for follow-ups)
@@ -1220,7 +1334,7 @@ export class Repl {
       if (interpretation.pageType === "content") {
         render.contentBox(content.title, interpretation.summary);
       } else {
-        render.status(interpretation.summary);
+        render.navSummary(content.title, interpretation.summary, this.state.currentUrl);
       }
     }
 
@@ -1241,14 +1355,30 @@ export class Repl {
     const hints: string[] = [];
 
     if (this.state.lastExtracted) {
-      hints.push("/show to view page", "/save to save data");
-    } else if (this.engine.isShowing()) {
-      hints.push("/hide to go headless", "/back to go back");
-    } else {
-      hints.push("/show to open browser", "/back to go back");
+      hints.push("/save to save data");
+    }
+    if (this.crawlManager.cursorIndex > 0 || this.crawlManager.hasStash()) {
+      hints.push("/back to go back");
+    }
+    if (this.state.loginAvailable) {
+      hints.push("/login to sign in");
+    }
+    if (this.state.detectedForms.length > 0) {
+      hints.push("type to search/filter");
     }
 
-    render.hint(hints);
+    // Ensure at least one general hint
+    if (hints.length === 0) {
+      if (this.engine.isShowing()) {
+        hints.push("/hide to go headless");
+      } else {
+        hints.push("/show to open browser");
+      }
+      hints.push("/goto <url> to navigate");
+    }
+
+    // Cap at 3 hints
+    render.hint(hints.slice(0, 3));
   }
 
   /**
@@ -1263,11 +1393,16 @@ export class Repl {
   }
 
   /**
-   * Store the LLM's summary on the current crawl node.
+   * Store the full LLM interpretation and current goal context on the current crawl node.
+   * Replaces the older storeSummaryOnNode — stores summary + full state for session persistence.
    */
-  private storeSummaryOnNode(summary: string): void {
-    if (!this.crawlManager.currentNodeId || !summary) return;
-    this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, { summary });
+  private storeStateOnNode(interpretation: PageInterpretation): void {
+    if (!this.crawlManager.currentNodeId) return;
+    const meta: { summary?: string; interpretation?: PageInterpretation; goalContext?: GoalContext } = {};
+    if (interpretation.summary) meta.summary = interpretation.summary;
+    meta.interpretation = interpretation;
+    meta.goalContext = { ...this.state.goalContext, breadcrumb: [...this.state.goalContext.breadcrumb] };
+    this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, meta);
   }
 
   /**
@@ -1294,50 +1429,118 @@ export class Repl {
   }
 
   /**
-   * Push current page state onto the stack before navigating away.
+   * Jump to a cursor history entry by 1-indexed number.
+   * Works across stash boundaries — if the target is in a stashed crawl,
+   * pushes current active onto stash, pops the target crawl, and jumps within it.
    */
-  private pushPageState(): void {
-    const snapshot = this.captureSnapshot();
-    if (snapshot) {
-      this.state.pageStack.push(snapshot);
+  private async jumpToHistory(n: number): Promise<void> {
+    const fullCursor = this.crawlManager.getFullCursorHistory();
+    if (n < 1 || n > fullCursor.length) {
+      render.error(`history entry ${n} out of range (1–${fullCursor.length})`);
+      return;
     }
-    // New navigation invalidates forward history (same as real browsers)
-    this.state.forwardStack = [];
-  }
+    const targetEntry = fullCursor[n - 1] as FullCursorEntry;
 
-  /**
-   * Capture current REPL state as a snapshot (pure data, no browser access).
-   */
-  private captureSnapshot(): PageSnapshot | null {
-    if (!this.state.currentInterpretation) return null;
-    return {
-      url: this.state.currentUrl,
-      pageTitle: this.state.lastPageTitle,
-      interpretation: this.state.currentInterpretation,
-      goalContext: { ...this.state.goalContext, breadcrumb: [...this.state.goalContext.breadcrumb] },
-    };
-  }
-
-  /**
-   * Restore a snapshot into current REPL state and render cached content.
-   * Pure data + display — no browser access.
-   */
-  private restoreSnapshot(snapshot: PageSnapshot): void {
-    this.state.currentUrl = snapshot.url;
-    this.state.goalContext = { ...snapshot.goalContext, breadcrumb: [...snapshot.goalContext.breadcrumb] };
-    this.state.lastPageTitle = snapshot.pageTitle;
-    this.setInterpretation(snapshot.interpretation);
-
-    render.status(`page loaded: "${snapshot.pageTitle}"`);
-    if (snapshot.interpretation.summary) {
-      if (snapshot.interpretation.pageType === "content") {
-        render.contentBox(snapshot.pageTitle, snapshot.interpretation.summary);
+    if (targetEntry.stashIndex === -1) {
+      // Target is in the active crawl — simple jump within active cursor
+      const stashEntryCount = fullCursor.length - this.crawlManager.cursorHistory.length;
+      const localIndex = (n - 1) - stashEntryCount;
+      const ok = this.crawlManager.cursorJump(localIndex);
+      if (!ok) {
+        render.error(`failed to jump to history entry ${n}`);
+        return;
+      }
+      const entry = this.crawlManager.cursorHistory[localIndex];
+      const node = this.crawlManager.getNode(entry.nodeId);
+      if (node) {
+        this.crawlManager.navigateToNode(node.id);
+        this.restoreFromNode(node);
       } else {
-        render.status(snapshot.interpretation.summary);
+        render.warn("node not found in crawl tree");
+      }
+    } else {
+      // Target is in a stashed crawl — need to swap crawls
+      const stashIdx = targetEntry.stashIndex;
+      if (stashIdx < 0 || stashIdx >= this.crawlManager.stash.length) {
+        render.error("stash entry not found");
+        return;
+      }
+      // Push current active onto stash
+      if (this.crawlManager.activeCrawl) {
+        this.crawlManager.pushStash();
+      }
+      // Extract the target crawl from stash (splice it out, don't pop from end)
+      const [targetStash] = this.crawlManager.stash.splice(stashIdx, 1);
+      // Restore it as active
+      this.crawlManager.activeCrawl = targetStash.activeCrawl;
+      this.crawlManager.nodes = targetStash.nodes;
+      this.crawlManager.nodeIndex = targetStash.nodeIndex;
+      this.crawlManager.currentNodeId = targetStash.currentNodeId;
+      this.crawlManager.cursorHistory = targetStash.cursorHistory;
+      this.crawlManager.cursorIndex = targetStash.cursorIndex;
+
+      // Now jump within this restored crawl's cursor to the right entry
+      // Find the local cursor index by matching nodeId + timestamp
+      const localIdx = this.crawlManager.cursorHistory.findIndex(
+        e => e.nodeId === targetEntry.nodeId && e.timestamp === targetEntry.timestamp
+      );
+      if (localIdx >= 0) {
+        this.crawlManager.cursorJump(localIdx);
+      }
+
+      const node = this.crawlManager.getNodeAcrossStash(targetEntry.nodeId);
+      if (node) {
+        this.crawlManager.navigateToNode(node.id);
+        // Restore site/base URL from the node
+        try {
+          const hostname = new URL(node.url).hostname;
+          this.state.site = hostname.replace(/^www\./, "").split(".")[0];
+          this.engine.setBaseUrl(new URL(node.url).origin);
+        } catch { /* invalid URL */ }
+        this.restoreFromNode(node);
+        render.status(`jumped to stashed crawl: "${targetStash.activeCrawl.name}"`);
+      } else {
+        render.warn("node not found in stashed crawl");
       }
     }
-    if (snapshot.interpretation.choices.length > 0) {
-      render.choices(snapshot.interpretation.choices.map((c) => ({ index: c.index, label: c.label })));
+    render.hint(["/refresh to update content"]);
+  }
+
+  /**
+   * Restore REPL state from a crawl node and render cached content.
+   * Pure data + display — no browser access.
+   */
+  private restoreFromNode(node: CrawlNode): void {
+    this.state.currentUrl = node.url;
+    this.state.lastPageTitle = node.title;
+
+    // Restore goal context if available
+    if (node.metadata?.goalContext) {
+      this.state.goalContext = {
+        ...node.metadata.goalContext,
+        breadcrumb: [...(node.metadata.goalContext.breadcrumb || [])],
+      };
+    }
+
+    // Restore interpretation if available
+    if (node.metadata?.interpretation) {
+      this.setInterpretation(node.metadata.interpretation);
+      const interp = node.metadata.interpretation;
+
+      if (interp.summary) {
+        if (interp.pageType === "content") {
+          render.contentBox(node.title, interp.summary);
+        } else {
+          render.navSummary(node.title, interp.summary, node.url);
+        }
+      }
+      if (interp.choices.length > 0) {
+        render.choices(interp.choices.map((c) => ({ index: c.index, label: c.label })));
+      }
+    } else {
+      // No cached interpretation — show hint
+      render.status(`restored: "${node.title}" (cached content unavailable)`);
+      render.hint(["/refresh to load content"]);
     }
   }
 
@@ -1491,8 +1694,7 @@ export class Repl {
   // ---------------------------------------------------------------
 
   private clearRepl(): void {
-    this.state.pageStack = [];
-    this.state.forwardStack = [];
+    this.crawlManager.resetCursor();
     this.state.currentInterpretation = null;
     this.state.previousInterpretation = null;
     this.state.lastExtracted = null;
@@ -1509,6 +1711,7 @@ export class Repl {
     if (this.crawlManager.activeCrawl) {
       try {
         const filepath = saveCrawl(this.crawlManager, this.state.log);
+        this.saveSessionSidecar();
         render.status(`crawl auto-saved to ${filepath}`);
       } catch {
         // No active crawl or save failed — continue
@@ -1517,15 +1720,134 @@ export class Repl {
     this.crawlManager.clear();
   }
 
+  /**
+   * Stash the current crawl onto the stash stack instead of destroying it.
+   * Saves to disk first, then pushes onto stash for /back recovery.
+   */
+  private stashCrawl(): void {
+    if (this.crawlManager.activeCrawl) {
+      try {
+        const filepath = saveCrawl(this.crawlManager, this.state.log);
+        this.saveSessionSidecar();
+        render.status(`crawl auto-saved to ${filepath}`);
+      } catch {
+        // Save failed — continue with stash anyway
+      }
+      this.crawlManager.pushStash();
+    }
+  }
+
   private async clearBrowser(): Promise<void> {
     await this.syncBrowser();
     await this.engine.clearBrowserData();
   }
 
+  /**
+   * Save session JSON sidecar alongside crawl markdown.
+   */
+  private saveSessionSidecar(): string | null {
+    return saveSession({
+      manager: this.crawlManager,
+      currentUrl: this.state.currentUrl,
+      site: this.state.site,
+      homeUrl: this.state.homeUrl,
+      goalContext: this.state.goalContext,
+      history: this.state.history,
+      log: this.state.log,
+    });
+  }
+
+  /**
+   * Expose crawlManager for session resume (used by index.ts).
+   */
+  getCrawlManager(): CrawlManager {
+    return this.crawlManager;
+  }
+
+  /**
+   * Resume from a saved session envelope. Restores all state.
+   */
+  async resumeSession(envelope: SessionEnvelope): Promise<void> {
+    restoreManagerFromEnvelope(envelope, this.crawlManager);
+
+    // Restore REPL state
+    this.state.currentUrl = envelope.repl.currentUrl;
+    this.state.site = envelope.repl.site;
+    this.state.homeUrl = envelope.repl.homeUrl;
+    this.state.goalContext = {
+      ...envelope.repl.goalContext,
+      breadcrumb: [...(envelope.repl.goalContext.breadcrumb || [])],
+    };
+    this.state.history = envelope.repl.history.map(h => ({ ...h }));
+    this.state.log = envelope.log.map(l => ({ ...l }));
+
+    // Restore current interpretation from current cursor node
+    const currentEntry = this.crawlManager.getCurrentCursorEntry();
+    if (currentEntry) {
+      const node = this.crawlManager.getNode(currentEntry.nodeId);
+      if (node?.metadata?.interpretation) {
+        this.state.currentInterpretation = node.metadata.interpretation;
+        this.state.lastPageTitle = node.title;
+      }
+    }
+
+    // Append resume marker to log
+    this.state.log.push({ role: "agent", content: "Session resumed", timestamp: Date.now() });
+
+    // Launch browser and navigate to current URL
+    render.status("launching headless browser...");
+    await this.engine.launch(this.state.currentUrl || "about:blank");
+
+    const page = this.engine.getPage();
+    this.nav = new PageNavigator(page);
+
+    if (this.state.currentUrl) {
+      try {
+        const hostname = new URL(this.state.currentUrl).hostname;
+        this.engine.setBaseUrl(new URL(this.state.currentUrl).origin);
+      } catch { /* invalid URL */ }
+
+      this.interceptor.attach(page, this.state.currentUrl);
+      this.interceptor.onIntercept = (resp) => {
+        if (!this.muteInterceptor) {
+          render.intercepted(resp.method, resp.url, resp.status, resp.size);
+        }
+      };
+
+      render.status(`navigating to ${this.state.currentUrl}...`);
+      try {
+        await this.nav.goto(this.state.currentUrl);
+      } catch { /* navigation failed — will show cached content */ }
+
+      // Render from cache (no LLM call)
+      const currentNode = this.crawlManager.currentNodeId
+        ? this.crawlManager.getNode(this.crawlManager.currentNodeId)
+        : null;
+      if (currentNode) {
+        this.restoreFromNode(currentNode);
+      }
+    }
+
+    render.success("session resumed");
+
+    // Start the input loop
+    this.startReadline();
+  }
+
   private async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    if (this.autoSaveTimer) {
+      clearInterval(this.autoSaveTimer);
+      this.autoSaveTimer = null;
+    }
     this.forceSave();
+    this.saveSessionSidecar();
+    // Save lastSessionId to config
+    if (this.crawlManager.activeCrawl) {
+      const config = loadConfig();
+      saveConfig({ ...config, lastSessionId: this.crawlManager.activeCrawl.id });
+    }
     render.status("session ended. browser closed.");
     await this.engine.close();
     this.rl.close();
