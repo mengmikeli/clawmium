@@ -156,7 +156,7 @@ async function main() {
 
       // Check for intercepted API data
       const responses = interceptor.getResponses();
-      const skipPatterns = ["/api/login", "/api/session", "/api/services", "/api/logout", "/api/account"];
+      const skipPatterns = ["/api/login", "/api/session", "/api/services", "/api/logout", "/api/account", "/api/report-categories"];
       for (let i = responses.length - 1; i >= 0; i--) {
         const resp = responses[i];
         if (!resp.url.includes("/api/")) continue;

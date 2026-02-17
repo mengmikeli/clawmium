@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vehicle Registration — CityServe</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="vehicle">
+
+  <header class="site-header">
+    <div class="logo">CityServe <span>Bay Area Municipal Services</span></div>
+    <nav>
+      <a href="/">Services</a>
+      <a href="/dashboard.html">Dashboard</a>
+      <a href="#" id="logout-link">Sign Out</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <p style="margin:0 0 1rem;"><a href="/dashboard.html" style="font-size:0.8125rem;">&larr; Back to Dashboard</a></p>
+
+    <h1 class="page-title">Vehicle Registration Lookup</h1>
+    <p class="page-subtitle">Enter a license plate number to view registration details.</p>
+
+    <div class="bill-section">
+      <form id="vehicle-search-form" style="display:flex; gap:0.75rem; align-items:flex-end;">
+        <div class="form-group" style="flex:1; margin-bottom:0;">
+          <label for="plate-input">License Plate Number</label>
+          <input type="search" id="plate-input" name="plate" placeholder="e.g. ABC1234" autocomplete="off">
+        </div>
+        <button type="submit" class="btn btn-primary" style="width:auto; padding:0.5rem 1.5rem;">Search</button>
+      </form>
+    </div>
+
+    <div id="vehicle-result">
+      <!-- Populated by app.js -->
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

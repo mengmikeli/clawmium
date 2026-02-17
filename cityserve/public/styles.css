@@ -136,6 +136,11 @@ a:hover { text-decoration: underline; }
 .badge-paid   { background: #d1fae5; color: #065f46; }
 .badge-overdue { background: #fee2e2; color: #991b1b; }
 .badge-coming-soon { background: var(--slate-100); color: var(--slate-500); }
+.badge-active { background: #d1fae5; color: #065f46; }
+.badge-expired { background: #fee2e2; color: #991b1b; }
+.badge-open { background: #dbeafe; color: #1e40af; }
+.badge-resolved { background: #d1fae5; color: #065f46; }
+.badge-in-progress { background: #fef3c7; color: #92400e; }
 
 /* ---------- Dashboard Cards ---------- */
 .dashboard-grid {

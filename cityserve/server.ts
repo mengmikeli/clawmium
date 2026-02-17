@@ -7,6 +7,9 @@ import authRouter from "./api/auth";
 import servicesRouter from "./api/services";
 import waterBillRouter from "./api/water-bill";
 import accountRouter from "./api/account";
+import vehicleRouter from "./api/vehicle";
+import parksRouter from "./api/parks";
+import reportsRouter from "./api/reports";
 
 dotenv.config();
 
@@ -29,6 +32,9 @@ app.use("/api", authRouter);
 app.use("/api", servicesRouter);
 app.use("/api", waterBillRouter);
 app.use("/api", accountRouter);
+app.use("/api", vehicleRouter);
+app.use("/api", parksRouter);
+app.use("/api", reportsRouter);
 
 // ---------- Start ----------
 
