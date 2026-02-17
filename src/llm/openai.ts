@@ -3,12 +3,14 @@ import {
   LLMProvider,
   PageInterpretation,
   AgentAction,
+  AutoPlanResult,
   ExtractedData,
   ConversationContext,
 } from "./provider";
 import {
   INTERPRET_SYSTEM_PROMPT,
   PLAN_ACTION_SYSTEM_PROMPT,
+  AUTO_PLAN_SYSTEM_PROMPT,
   EXTRACT_DATA_SYSTEM_PROMPT,
 } from "./prompts";
 
@@ -69,6 +71,22 @@ export class OpenAIProvider implements LLMProvider {
     const text = response.choices[0].message.content;
     if (!text) throw new Error("Empty response from OpenAI");
     return JSON.parse(text) as AgentAction;
+  }
+
+  async planAutoAction(formattedContext: string): Promise<AutoPlanResult> {
+    const response = await this.client.chat.completions.create({
+      model: this.model,
+      max_tokens: tokenLimit("MAX_TOKENS_PLAN", 512),
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: AUTO_PLAN_SYSTEM_PROMPT },
+        { role: "user", content: formattedContext },
+      ],
+    });
+
+    const text = response.choices[0].message.content;
+    if (!text) throw new Error("Empty response from OpenAI");
+    return JSON.parse(text) as AutoPlanResult;
   }
 
   async extractData(rawData: string, userGoal: string): Promise<ExtractedData> {

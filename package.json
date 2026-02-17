@@ -16,6 +16,7 @@
     "test:crawl-phase4": "tsx src/__test__crawl_phase4.ts",
     "test:session": "tsx src/__test__session.ts",
     "test:stash-eval": "tsx src/__test__stash_eval.ts",
+    "test:auto": "tsx src/__test__auto.ts",
     "clm": "tsx src/index.ts"
   },
   "keywords": [],

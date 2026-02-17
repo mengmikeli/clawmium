@@ -27,6 +27,13 @@ export interface AgentAction {
   reason: string;
 }
 
+export interface AutoPlanResult {
+  choiceIndex?: number;
+  type?: "extract" | "fill" | "ask_human";
+  value?: string;         // for fill actions
+  reasoning: string;
+}
+
 export interface ExtractedData {
   title: string;
   summary: string;
@@ -50,5 +57,6 @@ export interface ConversationContext {
 export interface LLMProvider {
   interpret(pageContent: string, userGoal: string, conversationContext?: string): Promise<PageInterpretation>;
   planAction(interpretation: PageInterpretation, context: ConversationContext): Promise<AgentAction>;
+  planAutoAction(formattedContext: string): Promise<AutoPlanResult>;
   extractData(rawData: string, userGoal: string): Promise<ExtractedData>;
 }

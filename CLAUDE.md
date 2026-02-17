@@ -65,6 +65,11 @@ clawmium/
 │   │   └── goals.ts         # Pure functions: formatGoal(), addBreadcrumb()
 │   ├── output/
 │   │   └── writer.ts        # Save data + session logs to ~/clm/{site}/
+│   ├── auto/
+│   │   ├── executor.ts      # executeChoice() — shared choice execution for human + auto paths
+│   │   └── runner.ts        # runAuto() — autonomous browsing loop with step/loop/error limits
+│   ├── __test__auto.ts          # Auto mode unit tests (63 assertions)
+│   ├── __test__auto_e2e.ts      # Auto mode E2E test (CityServe + real LLM, not counted in unit total)
 │   ├── __test__crawl.ts         # Crawl tree + persistence + stash (152 assertions)
 │   ├── __test__crawl_llm.ts     # Crawl LLM integration (48 assertions)
 │   ├── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
@@ -91,6 +96,9 @@ clawmium/
     ├── 2026-02-17-0.md      # Session persistence + main view polish — trail representations compound
     ├── 2026-02-17-1.md      # Meta-learnings — five principles from the Feb 16-17 sprint
     ├── 2026-02-17-2.md      # Session, crawl, memory — three layers of browsing state
+    ├── 2026-02-17-3.md      # Banner fix + strategic checkpoint — LLM intelligence focus
+    ├── 2026-02-17-4.md      # REPL risk review + refactor plan (phase proposal)
+    ├── 2026-02-17-5.md      # /auto mode spike — extraction boundary discovery
     └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
@@ -261,6 +269,7 @@ Every navigation is recorded as a node in a tree. The tree persists to markdown 
 interface LLMProvider {
   interpret(pageContent: string, userGoal: string, conversationContext?: string): Promise<PageInterpretation>;
   planAction(interpretation: PageInterpretation, context: ConversationContext): Promise<AgentAction>;
+  planAutoAction(formattedContext: string): Promise<AutoPlanResult>;
   extractData(rawData: string, userGoal: string): Promise<ExtractedData>;
 }
 ```
@@ -297,6 +306,7 @@ Token limits are configurable per method via environment variables. Both provide
 | `/tree` | Show crawl navigation tree (enriched: summaries, icons, current marker) |
 | `/crawl` | Manage crawls: list, load, rename, end, info |
 | `/clear` | Reset state: repl, crawl, browser, or all (crawl auto-saves) |
+| `/auto <goal>` | Autonomous browsing loop — interpret → plan → execute until goal met or limit hit |
 | `/demo` | Run CityServe demo (localhost:3000, goal: "check my water bill") |
 | `/quit` | Save and exit |
 | `/help` | Show command list |
@@ -375,6 +385,7 @@ npm run test:crawl-llm     # Crawl LLM integration (48 assertions)
 npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
 npm run test:session       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
 npm run test:stash-eval    # Stash eval — cross-domain stash correctness (86 assertions)
+npm run test:auto          # Auto mode — runner, executor, plan parsing (63 assertions)
 ```
 
 ## File Output
@@ -446,3 +457,4 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **Session persistence — crawl node as source of truth (2026-02-16)** — Six-phase refactor: (1) Enriched `CrawlNode.metadata` with `interpretation` and `goalContext`. (2) Added `cursorHistory[]` + `cursorIndex` to CrawlManager, replacing `pageStack`/`forwardStack`/`visitHistory` on SessionState. (3) Rewrote `/back`, `/forward`, `/history`, `/stack` to use cursor; `restoreFromNode()` replaces `restoreSnapshot()`. (4) New `src/session/persistence.ts` — `SessionEnvelope` JSON sidecar written alongside crawl markdown, enabling full session round-trip. `loadCrawl()` prefers JSON over markdown. (5) Auto-resume on startup: finds last session < 7 days, prompts to resume. `--new` flag bypasses. (6) Periodic auto-save (60s). New test suite: `__test__session.ts` with 118 assertions.
 - **Main view polish + configurable max_tokens (2026-02-17)** — Three problems fixed: (1) Noisy cascade of dim status lines during page load replaced with single overwriting `render.progress()` line + `render.progressDone()`. (2) Navigation page summaries (previously dim `render.status()`, invisible) now use `render.navSummary()` — bold title, word-wrapped white text, dim hostname. (3) `max_tokens` for interpret raised from 1024→2048 default, all three LLM methods (`interpret`/`planAction`/`extractData`) configurable via `MAX_TOKENS_INTERPRET`/`MAX_TOKENS_PLAN`/`MAX_TOKENS_EXTRACT` env vars. Both providers use shared `tokenLimit()` helper. Prompt updated: content pages get 3-6 sentence summaries, navigation 1-3 sentences. `suggestCommands()` now context-aware (checks cursor position, login, forms, extracted data). 6 files changed, 0 test regressions (401 assertions across 5 suites).
 - **Crawl stash — cross-domain navigation history (2026-02-17)** — Cross-domain `/goto` was destroying in-session navigation history. Fix: instead of `clearCrawl()` on external navigation, `stashCrawl()` pushes the active crawl onto `CrawlManager.stash: StashedCrawl[]`. `/back` at start of new crawl pops the stash. `/history` shows unified history across all stashed + active crawls via `getFullCursorHistory()`. `/stack` shows stash indicator. `SessionEnvelope` bumped to v3 with `stash: SerializedStashedCrawl[]` (backward-compatible with v2). `/crawl end` uses `clearActive()` (preserves stash), `/crawl load` stashes current crawl. `/clear crawl` still clears everything. Stash capped at 10 entries. New types: `StashedCrawl`, `FullCursorEntry`. 6 files changed, 0 test regressions (380 assertions across 4 suites).
+- **`/auto` mode — autonomous browsing (2026-02-17)** — `/auto <goal>` drives the browser autonomously: interpret page → `planAutoAction()` (new LLM method, operates on numbered choices not selectors) → `executeChoice()` → loop. Terminal conditions: data found, step limit (10), loop detection (same URL visited twice), consecutive errors (2), Ctrl+C abort, or `ask_human`. New `src/auto/` module: `executor.ts` (shared `executeChoice()` extracted from REPL — first concrete REPL refactor step), `runner.ts` (autonomous loop as implicit state machine). CityServe SPA auth fix (interceptor clear + 500ms settle delay). New `AutoPlanResult` type + `planAutoAction()` on `LLMProvider` interface. 63 unit assertions + E2E integration test. See `learnings/2026-02-17-5.md`.

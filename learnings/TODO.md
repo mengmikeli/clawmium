@@ -9,7 +9,7 @@
 3. ~~**Crawl tree — Phase 1 (data structures + persistence)**~~ — done. `CrawlNode`, `Crawl`, `CrawlManager` in `src/crawl/`. Tree operations: create, find (dedup via nodeIndex), attach, detach, ancestors, display. Markdown persistence to `~/clm/crawls/`. All 113 tests passing.
 4. ~~**Crawl tree — Phase 2 (REPL hooks + /tree + /clear)**~~ — done. Hooked `addNavigation()` into all 10 REPL navigation paths via `pendingReachedBy` + `trackNavigation()`. Added `/tree` display command, `/clear` command with scopes (repl, crawl, browser, all) and auto-save.
 5. ~~**Split `/url` into `/url` + `/stack`**~~ — done (`e3b1fe4`). `/url` now prints just the current URL (one line). Old debug view (browser URL, sync status, back/forward stacks) moved to `/stack`.
-6. **`/auto` mode spike** — wire up `planAction()` behind `/auto <goal>`. Loop: `interpret -> planAction -> execute`, human interrupts with Ctrl+C or agent hands off auth. Test on CityServe demo first. Autonomous navigation should build crawl nodes as it goes.
+6. ~~**`/auto` mode spike**~~ — done. `/auto <goal>` drives autonomous browsing loop (interpret → planAutoAction → executeChoice). Stops on: data found, step limit, loop detection, consecutive errors, abort, or `ask_human`. `executeChoice()` extracted to `src/auto/executor.ts` (shared between human + auto paths — first REPL refactor extraction). 63 unit assertions + E2E test against CityServe.
 7. **MCP server — design + prototype** — Clawmium is agent-first; agents need a programmatic interface. Design which tools to expose (browse, extract, click, fill, screenshot, tree context?). Build a minimal MCP server.
 
 ## Medium

@@ -215,6 +215,7 @@ export function help(): void {
   console.log(`  ${CYAN}/tree${RESET}          Show crawl navigation tree`);
   console.log(`  ${CYAN}/crawl${RESET}         Manage crawls (list, load, rename, end, info)`);
   console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
+  console.log(`  ${CYAN}/auto <goal>${RESET}   Agent drives browser toward a goal`);
   console.log(`  ${CYAN}/demo${RESET}          Run CityServe demo`);
   console.log(`  ${CYAN}/quit${RESET}          End session`);
   console.log(`  ${CYAN}/help${RESET}          Show this help`);
@@ -552,5 +553,57 @@ export function stashIndicator(depth: number, names: string[]): void {
     console.log(`    ${DIM}▸${RESET} ${names[i]}`);
   }
   console.log(`  ${DIM}(/back at start of crawl pops the stash)${RESET}`);
+  console.log();
+}
+
+// ---------------------------------------------------------------
+// Auto mode display
+// ---------------------------------------------------------------
+
+export function autoProgress(step: number, max: number, msg: string): void {
+  process.stdout.write(`\r${DIM}⋯ auto [${step}/${max}] ${msg}${RESET}\x1b[K`);
+}
+
+export function autoStep(step: number, max: number, label: string, reasoning: string): void {
+  // Truncate reasoning to fit on one line
+  const maxReasoning = 60;
+  const truncated = reasoning.length > maxReasoning
+    ? reasoning.slice(0, maxReasoning - 3) + "..."
+    : reasoning;
+  console.log(`${DIM}→ auto [${step}/${max}]${RESET} ${WHITE}${label}${RESET} ${DIM}— ${truncated}${RESET}`);
+}
+
+export interface AutoResultDisplay {
+  outcome: string;
+  steps: Array<{ choiceLabel: string; reasoning: string }>;
+  message: string;
+  extracted?: { title: string; fields: Record<string, unknown> };
+}
+
+export function autoResult(result: AutoResultDisplay): void {
+  console.log();
+  switch (result.outcome) {
+    case "completed":
+      console.log(`${GREEN}✓ auto completed in ${result.steps.length} step${result.steps.length !== 1 ? "s" : ""}${RESET}`);
+      break;
+    case "cancelled":
+      console.log(`${YELLOW}⚠ auto cancelled${RESET}`);
+      break;
+    case "stuck":
+      console.log(`${YELLOW}⚠ auto stopped — ${result.message}${RESET}`);
+      break;
+    case "step_limit":
+      console.log(`${YELLOW}⚠ auto stopped — step limit reached (${result.steps.length} steps)${RESET}`);
+      break;
+    case "login_failed":
+      console.log(`${RED}✗ auto stopped — login failed${RESET}`);
+      break;
+    default:
+      console.log(`${YELLOW}⚠ auto stopped — ${result.outcome}: ${result.message}${RESET}`);
+  }
+
+  if (result.extracted) {
+    dataTable(result.extracted.title, result.extracted.fields);
+  }
   console.log();
 }

@@ -15,6 +15,8 @@ import { saveCrawl, loadCrawl, listCrawls, peekCrawl } from "../crawl/persistenc
 import { deriveCrawlName } from "../crawl/namer";
 import { formatAncestorContext } from "../crawl/context";
 import { saveSession, restoreManagerFromEnvelope, SessionEnvelope } from "../session/persistence";
+import { executeChoice, ExecutionDeps } from "../auto/executor";
+import { runAuto, AutoResult } from "../auto/runner";
 
 const LLM_TIMEOUT = 30_000; // 30s timeout for LLM calls
 
@@ -320,6 +322,8 @@ export class Repl {
       this.state.loginAvailable = false;
       this.state.currentUrl = authResult.redirectedTo;
       this.state.pendingReachedBy = "auto";
+      this.interceptor.clear();                                // wipe stale auth responses
+      await this.engine.getPage().waitForTimeout(500);         // let SPA JS populate DOM
       this.startReadline();
       await this.processCurrentPage();
       this.rl.prompt();
@@ -880,6 +884,19 @@ export class Repl {
           this.rl.prompt();
           return;
 
+        case "auto": {
+          const autoGoal = arg;
+          if (!autoGoal) {
+            render.error("usage: /auto <goal>");
+            this.rl.prompt();
+            return;
+          }
+          await this.runAutoMode(autoGoal);
+          this.logCommand(`/auto ${autoGoal}`);
+          this.rl.prompt();
+          return;
+        }
+
         case "demo": {
           const demoUrl = process.env.BASE_URL || "http://localhost:3000";
           this.state.goalContext = { baseGoal: "check my water bill", activeIntent: "", breadcrumb: [] };
@@ -1149,7 +1166,7 @@ export class Repl {
     }
 
     // Command-like input detection — prompt if user typed a bare command name
-    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "history", "tree", "clear", "crawl"];
+    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "history", "tree", "clear", "crawl", "auto"];
     const lowerInput = input.toLowerCase();
     if (knownCommands.includes(lowerInput) || knownCommands.some(c => lowerInput.startsWith(c + " "))) {
       const confirmed = await this.confirmAction(`did you mean /${lowerInput}?`);
@@ -1189,9 +1206,8 @@ export class Repl {
           return;
         }
 
-        // Handle fill choices (search, filter — LLM-generated fill plans)
+        // Handle fill choices (search, filter — prompt for value then execute)
         if (choice.action === "fill" && choice.fillPlan) {
-          const plan = choice.fillPlan;
           const query = await new Promise<string>((resolve) => {
             this.rl.question("  search query: ", resolve);
           });
@@ -1200,36 +1216,14 @@ export class Repl {
 
           render.status(`searching for "${trimmedQuery}"...`);
           await this.syncBrowser();
-          const page = this.engine.getPage();
-          try {
-            await page.fill(plan.inputSelector, trimmedQuery);
-            if (plan.submitAction === "click" && plan.submitSelector) {
-              await page.click(plan.submitSelector);
-            } else {
-              await page.press(plan.inputSelector, "Enter");
-            }
-            await page.waitForLoadState("networkidle").catch(() => {});
-            await page.waitForTimeout(500);
-          } catch {
-            // Fallback: try form.submit() on the closest form
-            render.warn("form submission failed — trying form.submit()");
-            try {
-              await page.evaluate((sel) => {
-                const el = document.querySelector(sel);
-                const form = el?.closest("form") as HTMLFormElement | null;
-                form?.submit();
-              }, plan.inputSelector);
-              await page.waitForLoadState("networkidle").catch(() => {});
-            } catch { /* give up */ }
-          }
-          this.crawlManager.truncateCursorForward();
-          try { this.state.currentUrl = this.nav.currentUrl(); } catch {}
+          const result = await executeChoice(choice, this.buildExecDeps(), trimmedQuery);
           this.state.goalContext.activeIntent = trimmedQuery;
           if (!this.crawlManager.activeCrawl) {
             this.addBreadcrumb(`search: ${trimmedQuery}`);
           }
-          this.state.pendingReachedBy = "choice";
-          await this.processCurrentPage();
+          if (result.navigated) {
+            await this.processCurrentPage();
+          }
           this.rl.prompt();
           return;
         }
@@ -1239,43 +1233,14 @@ export class Repl {
           this.addBreadcrumb(choice.label);
         }
 
-        if (choice.url) {
-          // Skip anchor-only links (e.g. #site-content)
-          if (choice.url.startsWith("#") || (choice.url.includes("#") && new URL(choice.url).pathname === new URL(this.state.currentUrl).pathname)) {
-            render.status("anchor link — staying on current page");
-          } else {
-            this.crawlManager.truncateCursorForward();
-            render.status(`navigating to ${choice.label}...`);
-            await this.nav.goto(choice.url);
-          }
-        } else if (choice.selector) {
-          render.status(`navigating to ${choice.label}...`);
-          this.crawlManager.truncateCursorForward();
-          try {
-            // Check if it's an anchor link before clicking
-            const href = await this.engine.getPage().getAttribute(choice.selector, "href").catch(() => null);
-            if (href && (href.startsWith("#") || href === "")) {
-              render.status("anchor link — staying on current page");
-            } else {
-              await this.engine.getPage().click(choice.selector);
-              await this.engine.getPage().waitForLoadState("networkidle").catch(() => {});
-            }
-          } catch {
-            render.status("click failed, trying navigation...");
-            const href = await this.engine.getPage().getAttribute(choice.selector, "href").catch(() => null);
-            if (href && !href.startsWith("#")) {
-              const url = href.startsWith("http") ? href : `${this.engine.getBaseUrl()}${href}`;
-              await this.nav.goto(url);
-            }
-          }
+        render.status(`navigating to ${choice.label}...`);
+        await this.syncBrowser();
+        const result = await executeChoice(choice, this.buildExecDeps());
+        if (result.anchorSkipped) {
+          render.status("anchor link — staying on current page");
+        } else if (result.navigated) {
+          await this.processCurrentPage();
         }
-
-        // Wait briefly for API responses
-        await this.engine.getPage().waitForTimeout(500);
-        // Update currentUrl to wherever the browser ended up
-        try { this.state.currentUrl = this.nav.currentUrl(); } catch { /* dead page */ }
-        this.state.pendingReachedBy = "choice";
-        await this.processCurrentPage();
         this.rl.prompt();
         return;
       }
@@ -1348,6 +1313,243 @@ export class Repl {
     this.rl.prompt();
   }
 
+  // ---------------------------------------------------------------
+  // /auto mode
+  // ---------------------------------------------------------------
+
+  /**
+   * Interpret the current page without rendering anything.
+   * Same logic as _processCurrentPage() but returns the interpretation
+   * instead of rendering it. Used by /auto mode.
+   */
+  private async interpretPageOnly(): Promise<PageInterpretation> {
+    const page = this.engine.getPage();
+
+    // Check for login page
+    this.state.loginAvailable = false;
+    const loginCheck = await detectLoginPage(page);
+    if (loginCheck.isLoginPage) {
+      this.state.loginAvailable = true;
+    }
+
+    // Detect interactive forms
+    this.state.detectedForms = await detectInteractiveForms(page);
+
+    // HN item page — special handling
+    if (isHNItemPage(this.state.currentUrl)) {
+      const hnItem = await extractHNComments(page);
+      if (hnItem) {
+        this.state.lastPageTitle = hnItem.title;
+        this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
+        this.state.pendingReachedBy = "auto";
+
+        const hnText = formatHNPageForLLM(hnItem);
+        const hnAncestorCtx = formatAncestorContext(this.crawlManager);
+        const hnConversationCtx = this.state.goalContext.activeIntent || undefined;
+        const hnFullCtx = [hnAncestorCtx, hnConversationCtx].filter(Boolean).join("\n\n") || undefined;
+        const interpretation = await withTimeout(
+          this.llm.interpret(hnText, this.formatGoal(), hnFullCtx),
+          LLM_TIMEOUT,
+          "LLM interpret",
+          this.signal
+        );
+        this.setInterpretation(interpretation);
+        this.storeStateOnNode(interpretation);
+        this.maybeNameCrawl(interpretation.summary);
+
+        // Add HN article URL as first choice
+        const choices = interpretation.choices;
+        if (hnItem.articleUrl) {
+          choices.unshift({
+            index: 0,
+            label: "Read linked article",
+            action: "navigate",
+            url: hnItem.articleUrl,
+          });
+          for (let i = 0; i < choices.length; i++) {
+            choices[i].index = i + 1;
+          }
+        }
+
+        this.appendSystemChoices(interpretation);
+        return interpretation;
+      }
+    }
+
+    // Extract page content
+    const content = await this.nav.extractContent();
+    this.state.lastPageTitle = content.title;
+    this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
+    this.state.pendingReachedBy = "auto";
+
+    // Check for intercepted API data
+    const apiData = this.findRelevantApiData();
+    if (apiData) {
+      // Create a synthetic interpretation with dataFound
+      const interpretation: PageInterpretation = {
+        pageType: "data",
+        summary: `Structured API data captured from ${this.state.currentUrl}`,
+        choices: [],
+        dataFound: apiData as Record<string, unknown>,
+        requiresAuth: false,
+        requiresHumanInput: false,
+      };
+      this.setInterpretation(interpretation);
+      this.storeStateOnNode(interpretation);
+      return interpretation;
+    }
+
+    // Build page text (with rich content fallback)
+    let pageText = this.buildPageText(content);
+    const visibleTextLen = content.text.trim().length;
+
+    if (visibleTextLen < 500) {
+      const richContent = this.interceptor.findRichContent();
+      if (richContent) {
+        pageText = [
+          `Title: ${content.title}`,
+          `URL: ${content.url}`,
+          `\nContent (from network):`,
+          richContent.slice(0, 8000),
+        ].join("\n");
+      } else {
+        await this.scrollToLoad();
+        const reloaded = await this.nav.extractContent();
+        if (reloaded.text.trim().length > visibleTextLen) {
+          pageText = this.buildPageText(reloaded);
+        }
+      }
+    }
+
+    const ancestorCtx = formatAncestorContext(this.crawlManager);
+    const conversationCtx = this.state.goalContext.activeIntent || undefined;
+    const fullCtx = [ancestorCtx, conversationCtx].filter(Boolean).join("\n\n") || undefined;
+    const interpretation = await withTimeout(
+      this.llm.interpret(pageText, this.formatGoal(), fullCtx),
+      LLM_TIMEOUT,
+      "LLM interpret",
+      this.signal
+    );
+    this.setInterpretation(interpretation);
+    this.storeStateOnNode(interpretation);
+    this.maybeNameCrawl(interpretation.summary);
+    this.appendSystemChoices(interpretation);
+
+    return interpretation;
+  }
+
+  /**
+   * Run auto mode: LLM drives the browser toward a goal.
+   */
+  private async runAutoMode(goal: string): Promise<void> {
+    // Set goal context
+    this.state.goalContext.activeIntent = goal;
+    this.logAgent(`Auto mode started: "${goal}"`);
+
+    // Create a dedicated AbortController for this auto session
+    const autoAbort = new AbortController();
+    const prevAbort = this.abortController;
+    this.abortController = autoAbort;
+
+    const deps: import("../auto/runner").AutoDeps = {
+      llm: this.llm,
+      execDeps: this.buildExecDeps(),
+      syncBrowser: () => this.syncBrowser(),
+      interpretPage: () => this.interpretPageOnly(),
+      extractAndReturn: async (rawData: string, g: string) => {
+        return await withTimeout(
+          this.llm.extractData(rawData, g),
+          LLM_TIMEOUT,
+          "LLM extract",
+          autoAbort.signal,
+        );
+      },
+      handleAuth: async () => {
+        // Run auth flow and return success
+        await this.syncBrowser();
+        const page = this.engine.getPage();
+        const hasPasswordForm = await page.evaluate(() => {
+          const forms = document.querySelectorAll("form");
+          for (const form of forms) {
+            if (form.querySelector('input[type="password"]')) return true;
+          }
+          return false;
+        });
+        if (!hasPasswordForm) return false;
+
+        render.status("auto: login required — entering credentials...");
+        this.muteInterceptor = true;
+        this.closingForAuth = true;
+        if (this.rl) this.rl.close();
+        this.closingForAuth = false;
+
+        const { performCLIAuth } = await import("../auth/handoff");
+        const authResult = await performCLIAuth(page);
+        this.muteInterceptor = false;
+
+        if (authResult.success) {
+          render.success("login successful");
+          this.state.loginAvailable = false;
+          this.state.currentUrl = authResult.redirectedTo;
+          this.state.pendingReachedBy = "auto";
+          this.startReadline();
+          return true;
+        } else {
+          render.error("login failed");
+          this.startReadline();
+          return false;
+        }
+      },
+      getEnrichedTree: () => this.crawlManager.getEnrichedDisplayTree(),
+      getCurrentUrl: () => this.state.currentUrl,
+      getCurrentTitle: () => this.state.lastPageTitle,
+    };
+
+    const result = await runAuto(goal, deps, undefined, autoAbort.signal);
+
+    // Restore abort controller
+    this.abortController = prevAbort;
+
+    // Show the crawl tree
+    const tree = this.crawlManager.getEnrichedDisplayTree();
+    if (tree) {
+      console.log();
+      console.log(tree);
+    }
+
+    // Show result
+    render.autoResult({
+      outcome: result.outcome,
+      steps: result.steps.map(s => ({ choiceLabel: s.choiceLabel, reasoning: s.reasoning })),
+      message: result.message,
+      extracted: result.extracted ? { title: result.extracted.title, fields: result.extracted.fields } : undefined,
+    });
+
+    this.logAgent(`Auto mode ended: ${result.outcome} — ${result.message}`);
+
+    // If auto ended on a page with choices, show them so user can continue
+    if (this.state.currentInterpretation?.choices.length) {
+      render.choices(this.state.currentInterpretation.choices.map(c => ({ index: c.index, label: c.label })));
+    }
+    this.suggestCommands();
+  }
+
+  /**
+   * Build execution dependencies for executeChoice().
+   */
+  private buildExecDeps(): ExecutionDeps {
+    return {
+      page: () => this.engine.getPage(),
+      nav: this.nav,
+      engine: this.engine,
+      currentUrl: () => this.state.currentUrl,
+      setCurrentUrl: (url: string) => { this.state.currentUrl = url; },
+      setPendingReachedBy: (rb: string) => { this.state.pendingReachedBy = rb as ReachedBy; },
+      crawlManager: this.crawlManager,
+      interceptor: this.interceptor,
+    };
+  }
+
   /**
    * Suggest relevant slash commands based on current state.
    */
@@ -1369,6 +1571,7 @@ export class Repl {
 
     // Ensure at least one general hint
     if (hints.length === 0) {
+      hints.push("/auto <goal> for agent mode");
       if (this.engine.isShowing()) {
         hints.push("/hide to go headless");
       } else {
@@ -1546,7 +1749,7 @@ export class Repl {
 
   private findRelevantApiData(): unknown | null {
     const responses = this.interceptor.getResponses();
-    const skipPatterns = ["/api/login", "/api/session", "/api/services", "/api/logout"];
+    const skipPatterns = ["/api/login", "/api/session", "/api/services", "/api/logout", "/api/account"];
     for (let i = responses.length - 1; i >= 0; i--) {
       const resp = responses[i];
       // Only consider /api/ routes — non-api JSON is for content extraction
