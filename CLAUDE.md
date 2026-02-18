@@ -60,7 +60,12 @@ clawmium/
 │   ├── session/
 │   │   └── persistence.ts   # SessionEnvelope, saveSession/loadSession/findLastSession — JSON sidecar for full session resume
 │   ├── cli/
-│   │   ├── repl.ts          # Main REPL loop — slash commands, choice selection, free-text LLM conversation
+│   │   ├── repl.ts          # REPL core — dispatch map, choice execution, free-text follow-up, navigateAndProcess()
+│   │   ├── handler-types.ts # SessionState, ReplContext, CommandHandler, HandlerResult types
+│   │   ├── handlers/
+│   │   │   ├── navigation.ts # /show, /hide, /goto, /back, /forward, /refresh, /home, /demo (8 commands)
+│   │   │   ├── session.ts   # /save, /quit, /url, /help, /login, /auto, /clear (7 commands)
+│   │   │   └── crawl.ts     # /tree, /stack, /history, /crawl (4 commands with subcommands)
 │   │   ├── renderer.ts      # ANSI terminal output (banner, contentBox, navSummary, progress, dataTable, commentThread, choices, status lines)
 │   │   └── goals.ts         # Pure functions: formatGoal(), addBreadcrumb()
 │   ├── output/
@@ -73,6 +78,7 @@ clawmium/
 │   ├── __test__crawl.ts         # Crawl tree + persistence + stash (152 assertions)
 │   ├── __test__crawl_llm.ts     # Crawl LLM integration (48 assertions)
 │   ├── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
+│   ├── __test__repl.ts          # REPL command handler tests — mock factories, 43 assertions
 │   ├── __test__session.ts       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
 │   └── __test__stash_eval.ts    # Stash eval — cross-domain stash correctness (86 assertions)
 │
@@ -99,6 +105,7 @@ clawmium/
     ├── 2026-02-17-3.md      # Banner fix + strategic checkpoint — LLM intelligence focus
     ├── 2026-02-17-4.md      # REPL risk review + refactor plan (phase proposal)
     ├── 2026-02-17-5.md      # /auto mode spike — extraction boundary discovery
+    ├── 2026-02-18-0.md      # REPL refactor Phases 0–2 — reflection + scorecard vs plan
     └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
@@ -202,6 +209,7 @@ interface GoalContext {
   breadcrumb: string[];  // last 3 nav steps: ["HN front page", "AI article title"]
 }
 
+// Defined in src/cli/handler-types.ts — shared by repl.ts and all command handlers
 interface SessionState {
   goalContext: GoalContext;                   // Replaces flat userGoal string
   currentUrl: string;                        // REPL's canonical position — source of truth
@@ -262,6 +270,36 @@ Every navigation is recorded as a node in a tree. The tree persists to markdown 
 **Session persistence** (`src/session/persistence.ts`): `SessionEnvelope` (v3) captures the full session state as JSON. Saved as `{crawl-id}.session.json` alongside the markdown file. Contains serialized crawl tree (with interpretations and goal context on each node), cursor history, stash (array of serialized crawls), REPL state (URL, site, goal, conversation history), and session log. `findLastSession()` scans for the most recent sidecar within a configurable age window. Backward-compatible with v2 envelopes (backfills empty stash).
 
 **`pendingReachedBy` pattern**: The REPL sets `state.pendingReachedBy` before navigation (e.g., "choice", "goto"). `trackNavigation()` consumes it after the page loads to record how the user reached the new page. This decouples navigation intent from navigation execution.
+
+### Command Handler Architecture
+
+Slash commands are dispatched through a `COMMAND_HANDLERS: Record<string, CommandHandler>` map in `repl.ts`. Each handler is a pure async function receiving a `ReplContext` dependency bag:
+
+```typescript
+// src/cli/handler-types.ts
+type CommandHandler = (args: string, ctx: ReplContext) => Promise<HandlerResult | void>;
+
+interface ReplContext {
+  state: SessionState;           // Mutable session state
+  engine: BrowserEngine;         // Browser lifecycle
+  nav: PageNavigator;            // Navigation + content extraction
+  interceptor: NetworkInterceptor;
+  llm: LLMProvider;
+  crawlManager: CrawlManager;
+  rl: readline.Interface;
+  render: typeof import('./renderer');
+  // ... 22 bound methods (navigateAndProcess, restoreFromNode, stashCrawl, etc.)
+}
+```
+
+**Handler files** (`src/cli/handlers/`):
+- `navigation.ts` — 8 commands: `/show`, `/hide`, `/goto`, `/back`, `/forward`, `/refresh`, `/home`, `/demo`
+- `session.ts` — 7 commands: `/save`, `/quit`, `/url`, `/help`, `/login`, `/auto`, `/clear`
+- `crawl.ts` — 4 commands with subcommands: `/tree`, `/stack`, `/history`, `/crawl`
+
+**`navigateAndProcess()`**: Private method on `Repl` that owns the single navigation transaction — syncBrowser → truncateCursorForward → interceptor.clear → pendingReachedBy → preNavigate hook → nav.goto (try/catch) → currentUrl → settle → processCurrentPage. All navigation handlers call this instead of duplicating the sequence. Accepts an optional `preNavigate` callback for pre-navigation state changes (e.g., `/home` resets goalContext).
+
+**`handleInput()` flow**: Slash commands → dispatch map lookup → handler function. Numbered input → choice execution (still inline). Free text → LLM follow-up (still inline). Handlers return `void` (normal) or `{ promptHandled: true }` (for `/quit` and `/login` which manage their own readline lifecycle).
 
 ### LLM Provider Interface
 
@@ -386,6 +424,7 @@ npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
 npm run test:session       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
 npm run test:stash-eval    # Stash eval — cross-domain stash correctness (86 assertions)
 npm run test:auto          # Auto mode — runner, executor, plan parsing (63 assertions)
+npm run test:repl          # REPL command handlers — mock factories, dispatch (43 assertions)
 ```
 
 ## File Output
@@ -417,7 +456,7 @@ Every async operation has a fallback chain:
 | Component | Ideal | Fallback 1 | Fallback 2 |
 |-----------|-------|------------|------------|
 | Page load | `networkidle` (15s) | `domcontentloaded` (15s) | Continue with whatever loaded |
-| Navigation errors | Network (`net::` / `NS_ERROR_`) → "could not reach" message | HTTP status ≥ 400 → "returned HTTP {status}" message | All 4 REPL nav paths (`/goto`, `/home`, `/home set`, `/demo`) catch and display |
+| Navigation errors | Network (`net::` / `NS_ERROR_`) → "could not reach" message | HTTP status ≥ 400 → "returned HTTP {status}" message | All nav paths use `navigateAndProcess()` which catches and displays |
 | Content extraction | Intercepted network JSON | Scroll-to-load + re-extract DOM | Sparse content warning |
 | Browser state | `syncBrowser()` 3-point check (alive? responsive? correct URL?) | `recoverBrowser()` — relaunch headless | Error message to user |
 | Click navigation | `page.click(selector)` | Get `href` and `nav.goto()` | Detect anchor link, skip |
@@ -445,7 +484,7 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **Headless-first with cookie transfer** — Option A (offscreen window) replaced with true headless + relaunch-with-cookies for show/hide
 - **Fallback chains everywhere** — `networkidle` timeout, crash recovery, scroll-to-load, sparse content detection
 - **REPL stack refactor (2026-02-14)** — `state.currentUrl` replaces `page.url()` as source of truth. `syncBrowser()` replaces `ensureBrowser()`/`isAlive()`. `/back` and `/forward` are pure stack mutations. Added `/home`, `/refresh`, `/forward`, `/url` commands. See `learnings/2026-02-14-0.md`.
-- **`commands.ts` removed** — all command handling lives inline in `repl.ts`
+- **`commands.ts` removed** — command handling was inline in `repl.ts` until Phase 2 of the REPL refactor extracted it to `src/cli/handlers/`
 - **Phase 5: HN, forms, goals (2026-02-15)** — HN comment thread extraction + rendering, interactive form detection (search/filter with `fillPlan`), `GoalContext` replaces flat `userGoal` string (baseGoal + activeIntent + breadcrumb trail). New files: `src/sites/hn.ts`, `src/forms/detector.ts`, `src/cli/goals.ts`. See `learnings/2026-02-15-0.md`.
 - **Daily reflection ritual (2026-02-15)** — `/reflect` end-of-day and `/standup` start-of-day workflows via Claude Code skill. Persistent TODO at `learnings/TODO.md`.
 - **Architecture alignment (2026-02-16)** — Eight design decisions: layered audience, intelligence inside, `/auto` spike, generic-core site extractors, CLI+MCP interfaces, LLM agnosticism. See `learnings/2026-02-16-0.md` and `2026-02-16-1.md`.
@@ -458,3 +497,4 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **Main view polish + configurable max_tokens (2026-02-17)** — Three problems fixed: (1) Noisy cascade of dim status lines during page load replaced with single overwriting `render.progress()` line + `render.progressDone()`. (2) Navigation page summaries (previously dim `render.status()`, invisible) now use `render.navSummary()` — bold title, word-wrapped white text, dim hostname. (3) `max_tokens` for interpret raised from 1024→2048 default, all three LLM methods (`interpret`/`planAction`/`extractData`) configurable via `MAX_TOKENS_INTERPRET`/`MAX_TOKENS_PLAN`/`MAX_TOKENS_EXTRACT` env vars. Both providers use shared `tokenLimit()` helper. Prompt updated: content pages get 3-6 sentence summaries, navigation 1-3 sentences. `suggestCommands()` now context-aware (checks cursor position, login, forms, extracted data). 6 files changed, 0 test regressions (401 assertions across 5 suites).
 - **Crawl stash — cross-domain navigation history (2026-02-17)** — Cross-domain `/goto` was destroying in-session navigation history. Fix: instead of `clearCrawl()` on external navigation, `stashCrawl()` pushes the active crawl onto `CrawlManager.stash: StashedCrawl[]`. `/back` at start of new crawl pops the stash. `/history` shows unified history across all stashed + active crawls via `getFullCursorHistory()`. `/stack` shows stash indicator. `SessionEnvelope` bumped to v3 with `stash: SerializedStashedCrawl[]` (backward-compatible with v2). `/crawl end` uses `clearActive()` (preserves stash), `/crawl load` stashes current crawl. `/clear crawl` still clears everything. Stash capped at 10 entries. New types: `StashedCrawl`, `FullCursorEntry`. 6 files changed, 0 test regressions (380 assertions across 4 suites).
 - **`/auto` mode — autonomous browsing (2026-02-17)** — `/auto <goal>` drives the browser autonomously: interpret page → `planAutoAction()` (new LLM method, operates on numbered choices not selectors) → `executeChoice()` → loop. Terminal conditions: data found, step limit (10), loop detection (same URL visited twice), consecutive errors (2), Ctrl+C abort, or `ask_human`. New `src/auto/` module: `executor.ts` (shared `executeChoice()` extracted from REPL — first concrete REPL refactor step), `runner.ts` (autonomous loop as implicit state machine). CityServe SPA auth fix (interceptor clear + 500ms settle delay). New `AutoPlanResult` type + `planAutoAction()` on `LLMProvider` interface. 63 unit assertions + E2E integration test. See `learnings/2026-02-17-5.md`.
+- **REPL refactor Phases 0–2 (2026-02-18)** — Three-phase structural refactor of `repl.ts` (2134→1596 lines). Phase 0: safety net test suite (`__test__repl.ts`, 43 assertions) with mock factories for Page, Engine, Navigator, LLM, Interceptor, readline. Phase 1: `navigateAndProcess()` extraction — single 30-line method owning the 8-step navigation transaction (syncBrowser → truncateCursorForward → interceptor.clear → pendingReachedBy → preNavigate hook → nav.goto → currentUrl → processCurrentPage), replacing 4 duplicated inline sequences. Phase 2: command handler extraction — `SessionState` moved to `handler-types.ts`, 19 switch/case branches replaced with dispatch map routing to 3 handler files (`handlers/navigation.ts` 226 lines/8 commands, `handlers/session.ts` 105 lines/7 commands, `handlers/crawl.ts` 263 lines/4 commands). `handleInput()` reduced from ~784 lines to ~10-line dispatcher + ~150 lines for choice/free-text. `rl.prompt()` calls reduced from 58→15. `ReplContext` dependency bag (22 bound methods + 8 field accesses) makes handler coupling explicit. 524 total assertions across 7 suites, 0 failures. See `learnings/2026-02-18-0.md`.
