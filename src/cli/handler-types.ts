@@ -81,7 +81,7 @@ export interface ReplContext {
   clearCrawl: () => void;
   clearBrowser: () => Promise<void>;
   runLoginFlow: () => Promise<void>;
-  runAutoMode: (goal: string) => Promise<void>;
+  runAutoMode: (goal: string, maxSteps?: number) => Promise<void>;
   confirmAction: (question: string) => Promise<boolean>;
   jumpToHistory: (n: number) => Promise<void>;
   suggestCommands: () => void;

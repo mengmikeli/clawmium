@@ -646,6 +646,96 @@ async function main() {
   console.log();
 
   // ---------------------------------------------------------------
+  // GROUP 7: /auto --max-steps flag parsing (7 tests)
+  // ---------------------------------------------------------------
+  console.log("--- /auto --max-steps flag parsing ---\n");
+
+  console.log("33. /auto with plain goal calls runAutoMode(goal, undefined)...");
+  {
+    const { repl } = makeTestRepl();
+    let capturedGoal = "";
+    let capturedMaxSteps: number | undefined = -1;
+    (repl as any).runAutoMode = async (goal: string, maxSteps?: number) => {
+      capturedGoal = goal;
+      capturedMaxSteps = maxSteps;
+    };
+    await repl.handleInput("/auto find AI articles");
+    assert(capturedGoal === "find AI articles", "goal passed correctly");
+    assert(capturedMaxSteps === undefined, "maxSteps is undefined when no flag");
+  }
+  console.log();
+
+  console.log("34. /auto goal --max-steps 20 passes maxSteps=20...");
+  {
+    const { repl } = makeTestRepl();
+    let capturedGoal = "";
+    let capturedMaxSteps: number | undefined = -1;
+    (repl as any).runAutoMode = async (goal: string, maxSteps?: number) => {
+      capturedGoal = goal;
+      capturedMaxSteps = maxSteps;
+    };
+    await repl.handleInput("/auto find AI articles --max-steps 20");
+    assert(capturedGoal === "find AI articles", "goal extracted without flag");
+    assert(capturedMaxSteps === 20, "maxSteps is 20");
+  }
+  console.log();
+
+  console.log("35. /auto goal -s 5 passes maxSteps=5...");
+  {
+    const { repl } = makeTestRepl();
+    let capturedGoal = "";
+    let capturedMaxSteps: number | undefined = -1;
+    (repl as any).runAutoMode = async (goal: string, maxSteps?: number) => {
+      capturedGoal = goal;
+      capturedMaxSteps = maxSteps;
+    };
+    await repl.handleInput("/auto find AI articles -s 5");
+    assert(capturedGoal === "find AI articles", "goal extracted without short flag");
+    assert(capturedMaxSteps === 5, "maxSteps is 5");
+  }
+  console.log();
+
+  console.log("36. /auto goal --max-steps abc shows error...");
+  {
+    const { repl } = makeTestRepl();
+    let autoModeCalled = false;
+    (repl as any).runAutoMode = async () => { autoModeCalled = true; };
+    await repl.handleInput("/auto find articles --max-steps abc");
+    assert(!autoModeCalled, "runAutoMode NOT called for invalid --max-steps");
+  }
+  console.log();
+
+  console.log("37. /auto goal --max-steps 0 shows error (out of bounds)...");
+  {
+    const { repl } = makeTestRepl();
+    let autoModeCalled = false;
+    (repl as any).runAutoMode = async () => { autoModeCalled = true; };
+    await repl.handleInput("/auto find articles --max-steps 0");
+    assert(!autoModeCalled, "runAutoMode NOT called for --max-steps 0");
+  }
+  console.log();
+
+  console.log("38. /auto goal --max-steps 101 shows error (out of bounds)...");
+  {
+    const { repl } = makeTestRepl();
+    let autoModeCalled = false;
+    (repl as any).runAutoMode = async () => { autoModeCalled = true; };
+    await repl.handleInput("/auto find articles --max-steps 101");
+    assert(!autoModeCalled, "runAutoMode NOT called for --max-steps 101");
+  }
+  console.log();
+
+  console.log("39. /auto --max-steps 5 (no goal) shows error...");
+  {
+    const { repl } = makeTestRepl();
+    let autoModeCalled = false;
+    (repl as any).runAutoMode = async () => { autoModeCalled = true; };
+    await repl.handleInput("/auto --max-steps 5");
+    assert(!autoModeCalled, "runAutoMode NOT called when no goal text");
+  }
+  console.log();
+
+  // ---------------------------------------------------------------
   // Summary
   // ---------------------------------------------------------------
   console.log("=".repeat(50));

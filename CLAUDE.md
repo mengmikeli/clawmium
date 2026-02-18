@@ -78,7 +78,7 @@ clawmium/
 │   ├── __test__crawl.ts         # Crawl tree + persistence + stash (152 assertions)
 │   ├── __test__crawl_llm.ts     # Crawl LLM integration (48 assertions)
 │   ├── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
-│   ├── __test__repl.ts          # REPL command handler tests — mock factories, 43 assertions
+│   ├── __test__repl.ts          # REPL command handler tests — mock factories, 53 assertions
 │   ├── __test__session.ts       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
 │   └── __test__stash_eval.ts    # Stash eval — cross-domain stash correctness (86 assertions)
 │
@@ -106,6 +106,8 @@ clawmium/
     ├── 2026-02-17-4.md      # REPL risk review + refactor plan (phase proposal)
     ├── 2026-02-17-5.md      # /auto mode spike — extraction boundary discovery
     ├── 2026-02-18-0.md      # REPL refactor Phases 0–2 — reflection + scorecard vs plan
+    ├── 2026-02-18-1.md      # Plan — /auto max-steps config (CLI + .env default)
+    ├── 2026-02-18-2.md      # /auto --max-steps — configurable step limit reflection
     └── TODO.md              # Persistent todo list, updated daily via /reflect
 ```
 
@@ -322,6 +324,9 @@ ANTHROPIC_API_KEY=sk-ant-...
 MAX_TOKENS_INTERPRET=2048
 MAX_TOKENS_PLAN=512
 MAX_TOKENS_EXTRACT=1024
+
+# Auto mode step limit (optional — default: 10)
+AUTO_MAX_STEPS=10
 ```
 
 Token limits are configurable per method via environment variables. Both providers read from `process.env` at call time via a shared `tokenLimit(envVar, fallback)` helper. The `interpret` default was raised from 1024 to 2048 to allow richer summaries; `plan` and `extract` keep their original defaults.
@@ -344,7 +349,7 @@ Token limits are configurable per method via environment variables. Both provide
 | `/tree` | Show crawl navigation tree (enriched: summaries, icons, current marker) |
 | `/crawl` | Manage crawls: list, load, rename, end, info |
 | `/clear` | Reset state: repl, crawl, browser, or all (crawl auto-saves) |
-| `/auto <goal>` | Autonomous browsing loop — interpret → plan → execute until goal met or limit hit |
+| `/auto <goal> [--max-steps N]` | Autonomous browsing loop — interpret → plan → execute until goal met or limit hit |
 | `/demo` | Run CityServe demo (localhost:3000, goal: "check my water bill") |
 | `/quit` | Save and exit |
 | `/help` | Show command list |
@@ -424,7 +429,7 @@ npm run test:crawl-phase4  # Crawl command layer + display (31 assertions)
 npm run test:session       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
 npm run test:stash-eval    # Stash eval — cross-domain stash correctness (86 assertions)
 npm run test:auto          # Auto mode — runner, executor, plan parsing (63 assertions)
-npm run test:repl          # REPL command handlers — mock factories, dispatch (43 assertions)
+npm run test:repl          # REPL command handlers — mock factories, dispatch (53 assertions)
 ```
 
 ## File Output
@@ -496,5 +501,6 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **Session persistence — crawl node as source of truth (2026-02-16)** — Six-phase refactor: (1) Enriched `CrawlNode.metadata` with `interpretation` and `goalContext`. (2) Added `cursorHistory[]` + `cursorIndex` to CrawlManager, replacing `pageStack`/`forwardStack`/`visitHistory` on SessionState. (3) Rewrote `/back`, `/forward`, `/history`, `/stack` to use cursor; `restoreFromNode()` replaces `restoreSnapshot()`. (4) New `src/session/persistence.ts` — `SessionEnvelope` JSON sidecar written alongside crawl markdown, enabling full session round-trip. `loadCrawl()` prefers JSON over markdown. (5) Auto-resume on startup: finds last session < 7 days, prompts to resume. `--new` flag bypasses. (6) Periodic auto-save (60s). New test suite: `__test__session.ts` with 118 assertions.
 - **Main view polish + configurable max_tokens (2026-02-17)** — Three problems fixed: (1) Noisy cascade of dim status lines during page load replaced with single overwriting `render.progress()` line + `render.progressDone()`. (2) Navigation page summaries (previously dim `render.status()`, invisible) now use `render.navSummary()` — bold title, word-wrapped white text, dim hostname. (3) `max_tokens` for interpret raised from 1024→2048 default, all three LLM methods (`interpret`/`planAction`/`extractData`) configurable via `MAX_TOKENS_INTERPRET`/`MAX_TOKENS_PLAN`/`MAX_TOKENS_EXTRACT` env vars. Both providers use shared `tokenLimit()` helper. Prompt updated: content pages get 3-6 sentence summaries, navigation 1-3 sentences. `suggestCommands()` now context-aware (checks cursor position, login, forms, extracted data). 6 files changed, 0 test regressions (401 assertions across 5 suites).
 - **Crawl stash — cross-domain navigation history (2026-02-17)** — Cross-domain `/goto` was destroying in-session navigation history. Fix: instead of `clearCrawl()` on external navigation, `stashCrawl()` pushes the active crawl onto `CrawlManager.stash: StashedCrawl[]`. `/back` at start of new crawl pops the stash. `/history` shows unified history across all stashed + active crawls via `getFullCursorHistory()`. `/stack` shows stash indicator. `SessionEnvelope` bumped to v3 with `stash: SerializedStashedCrawl[]` (backward-compatible with v2). `/crawl end` uses `clearActive()` (preserves stash), `/crawl load` stashes current crawl. `/clear crawl` still clears everything. Stash capped at 10 entries. New types: `StashedCrawl`, `FullCursorEntry`. 6 files changed, 0 test regressions (380 assertions across 4 suites).
-- **`/auto` mode — autonomous browsing (2026-02-17)** — `/auto <goal>` drives the browser autonomously: interpret page → `planAutoAction()` (new LLM method, operates on numbered choices not selectors) → `executeChoice()` → loop. Terminal conditions: data found, step limit (10), loop detection (same URL visited twice), consecutive errors (2), Ctrl+C abort, or `ask_human`. New `src/auto/` module: `executor.ts` (shared `executeChoice()` extracted from REPL — first concrete REPL refactor step), `runner.ts` (autonomous loop as implicit state machine). CityServe SPA auth fix (interceptor clear + 500ms settle delay). New `AutoPlanResult` type + `planAutoAction()` on `LLMProvider` interface. 63 unit assertions + E2E integration test. See `learnings/2026-02-17-5.md`.
-- **REPL refactor Phases 0–2 (2026-02-18)** — Three-phase structural refactor of `repl.ts` (2134→1596 lines). Phase 0: safety net test suite (`__test__repl.ts`, 43 assertions) with mock factories for Page, Engine, Navigator, LLM, Interceptor, readline. Phase 1: `navigateAndProcess()` extraction — single 30-line method owning the 8-step navigation transaction (syncBrowser → truncateCursorForward → interceptor.clear → pendingReachedBy → preNavigate hook → nav.goto → currentUrl → processCurrentPage), replacing 4 duplicated inline sequences. Phase 2: command handler extraction — `SessionState` moved to `handler-types.ts`, 19 switch/case branches replaced with dispatch map routing to 3 handler files (`handlers/navigation.ts` 226 lines/8 commands, `handlers/session.ts` 105 lines/7 commands, `handlers/crawl.ts` 263 lines/4 commands). `handleInput()` reduced from ~784 lines to ~10-line dispatcher + ~150 lines for choice/free-text. `rl.prompt()` calls reduced from 58→15. `ReplContext` dependency bag (22 bound methods + 8 field accesses) makes handler coupling explicit. 524 total assertions across 7 suites, 0 failures. See `learnings/2026-02-18-0.md`.
+- **`/auto` mode — autonomous browsing (2026-02-17)** — `/auto <goal>` drives the browser autonomously: interpret page → `planAutoAction()` (new LLM method, operates on numbered choices not selectors) → `executeChoice()` → loop. Terminal conditions: data found, step limit (configurable via `--max-steps N` / `-s N` CLI flag or `AUTO_MAX_STEPS` env var, default 10), loop detection (same URL visited twice), consecutive errors (2), Ctrl+C abort, or `ask_human`. Precedence: CLI flag > `.env` > hardcoded default. New `src/auto/` module: `executor.ts` (shared `executeChoice()` extracted from REPL — first concrete REPL refactor step), `runner.ts` (autonomous loop as implicit state machine). CityServe SPA auth fix (interceptor clear + 500ms settle delay). New `AutoPlanResult` type + `planAutoAction()` on `LLMProvider` interface. 63 unit assertions + E2E integration test. See `learnings/2026-02-17-5.md`.
+- **REPL refactor Phases 0–2 (2026-02-18)** — Three-phase structural refactor of `repl.ts` (2134→1596 lines). Phase 0: safety net test suite (`__test__repl.ts`, 53 assertions) with mock factories for Page, Engine, Navigator, LLM, Interceptor, readline. Phase 1: `navigateAndProcess()` extraction — single 30-line method owning the 8-step navigation transaction (syncBrowser → truncateCursorForward → interceptor.clear → pendingReachedBy → preNavigate hook → nav.goto → currentUrl → processCurrentPage), replacing 4 duplicated inline sequences. Phase 2: command handler extraction — `SessionState` moved to `handler-types.ts`, 19 switch/case branches replaced with dispatch map routing to 3 handler files (`handlers/navigation.ts` 226 lines/8 commands, `handlers/session.ts` 105 lines/7 commands, `handlers/crawl.ts` 263 lines/4 commands). `handleInput()` reduced from ~784 lines to ~10-line dispatcher + ~150 lines for choice/free-text. `rl.prompt()` calls reduced from 58→15. `ReplContext` dependency bag (22 bound methods + 8 field accesses) makes handler coupling explicit. 534 total assertions across 7 suites, 0 failures. See `learnings/2026-02-18-0.md`.
+- **`/auto` configurable step limit (2026-02-18)** — Step limit was hardcoded at 10. Added `--max-steps N` / `-s N` CLI flag on `/auto` command + `AUTO_MAX_STEPS` env var. Precedence: CLI flag > `.env` > hardcoded default (10). Bounds validated 1–100. Flag parsing in `handleAuto()`, env reading in `runAutoMode()`, type propagated through `ReplContext`. 10 new test assertions (7 test cases). See `learnings/2026-02-18-2.md`.

@@ -1,6 +1,6 @@
 # TODO — Clawmium
 
-> Updated: 2026-02-18 (REPL refactor Phases 0–2 complete)
+> Updated: 2026-02-18 (`/auto --max-steps` config complete)
 
 ## High
 
@@ -9,9 +9,9 @@
 3. ~~**Crawl tree — Phase 1 (data structures + persistence)**~~ — done. `CrawlNode`, `Crawl`, `CrawlManager` in `src/crawl/`. Tree operations: create, find (dedup via nodeIndex), attach, detach, ancestors, display. Markdown persistence to `~/clm/crawls/`. All 113 tests passing.
 4. ~~**Crawl tree — Phase 2 (REPL hooks + /tree + /clear)**~~ — done. Hooked `addNavigation()` into all 10 REPL navigation paths via `pendingReachedBy` + `trackNavigation()`. Added `/tree` display command, `/clear` command with scopes (repl, crawl, browser, all) and auto-save.
 5. ~~**Split `/url` into `/url` + `/stack`**~~ — done (`e3b1fe4`). `/url` now prints just the current URL (one line). Old debug view (browser URL, sync status, back/forward stacks) moved to `/stack`.
-6. ~~**`/auto` mode spike**~~ — done. `/auto <goal>` drives autonomous browsing loop (interpret → planAutoAction → executeChoice). Stops on: data found, step limit, loop detection, consecutive errors, abort, or `ask_human`. `executeChoice()` extracted to `src/auto/executor.ts` (shared between human + auto paths — first REPL refactor extraction). 63 unit assertions + E2E test against CityServe.
+6. ~~**`/auto` mode spike**~~ — done. `/auto <goal>` drives autonomous browsing loop (interpret → planAutoAction → executeChoice). Stops on: data found, step limit, loop detection, consecutive errors, abort, or `ask_human`. `executeChoice()` extracted to `src/auto/executor.ts` (shared between human + auto paths — first REPL refactor extraction). 63 unit assertions + E2E test against CityServe. **Configurable step limit** added (2026-02-18): `--max-steps N` / `-s N` CLI flag + `AUTO_MAX_STEPS` env var. Precedence: CLI flag > `.env` > hardcoded default (10). See `learnings/2026-02-18-2.md`.
 7. **MCP server — design + prototype** — Clawmium is agent-first; agents need a programmatic interface. Design which tools to expose (browse, extract, click, fill, screenshot, tree context?). Build a minimal MCP server.
-19. ~~**REPL refactor Phases 0–2**~~ — done (`2026-02-18-0.md`). Phase 0: safety net tests (43 assertions). Phase 1: `navigateAndProcess()` extraction (single navigation transaction). Phase 2: command handler extraction (4 new files, 689 lines, dispatch map). `repl.ts` reduced from 2134→1596 lines, `rl.prompt()` from 58→15, `case` branches from 23→0. 524 total assertions, 0 failures.
+19. ~~**REPL refactor Phases 0–2**~~ — done (`2026-02-18-0.md`). Phase 0: safety net tests (43→53 assertions after `/auto --max-steps` tests added). Phase 1: `navigateAndProcess()` extraction (single navigation transaction). Phase 2: command handler extraction (4 new files, 689 lines, dispatch map). `repl.ts` reduced from 2134→1596 lines, `rl.prompt()` from 58→15, `case` branches from 23→0. 534 total assertions, 0 failures.
 
 ## Medium
 

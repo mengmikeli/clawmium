@@ -877,10 +877,23 @@ export class Repl {
   /**
    * Run auto mode: LLM drives the browser toward a goal.
    */
-  private async runAutoMode(goal: string): Promise<void> {
+  private async runAutoMode(goal: string, maxStepsOverride?: number): Promise<void> {
     // Set goal context
     this.state.goalContext.activeIntent = goal;
     this.logAgent(`Auto mode started: "${goal}"`);
+
+    // Resolve effective maxSteps: CLI flag > .env > hardcoded default (10)
+    let envSteps: number | undefined;
+    const envRaw = process.env.AUTO_MAX_STEPS;
+    if (envRaw) {
+      const parsed = parseInt(envRaw, 10);
+      if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 100) {
+        envSteps = parsed;
+      } else {
+        render.warn(`ignoring invalid AUTO_MAX_STEPS="${envRaw}" (must be 1–100)`);
+      }
+    }
+    const effectiveMaxSteps = maxStepsOverride ?? envSteps;
 
     // Create a dedicated AbortController for this auto session
     const autoAbort = new AbortController();
@@ -941,7 +954,7 @@ export class Repl {
       getCurrentTitle: () => this.state.lastPageTitle,
     };
 
-    const result = await runAuto(goal, deps, undefined, autoAbort.signal);
+    const result = await runAuto(goal, deps, effectiveMaxSteps ? { maxSteps: effectiveMaxSteps } : undefined, autoAbort.signal);
 
     // Restore abort controller
     this.abortController = prevAbort;
@@ -1011,7 +1024,7 @@ export class Repl {
       clearCrawl: () => this.clearCrawl(),
       clearBrowser: () => this.clearBrowser(),
       runLoginFlow: () => this.runLoginFlow(),
-      runAutoMode: (goal) => this.runAutoMode(goal),
+      runAutoMode: (goal, maxSteps) => this.runAutoMode(goal, maxSteps),
       confirmAction: (q) => this.confirmAction(q),
       jumpToHistory: (n) => this.jumpToHistory(n),
       suggestCommands: () => this.suggestCommands(),

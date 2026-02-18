@@ -51,11 +51,25 @@ export async function handleLogin(ctx: ReplContext): Promise<HandlerResult> {
 // ===================================================================
 
 export async function handleAuto(ctx: ReplContext, arg: string): Promise<void> {
-  if (!arg) {
-    render.error("usage: /auto <goal>");
+  // Parse --max-steps N or -s N from arg
+  const flagMatch = arg.match(/(?:--max-steps|-s)\s+(\S+)/);
+  let maxSteps: number | undefined;
+  let goal = arg;
+  if (flagMatch) {
+    goal = arg.replace(/(?:--max-steps|-s)\s+\S+/, "").trim();
+    const parsed = parseInt(flagMatch[1], 10);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+      render.error(`invalid --max-steps value: ${flagMatch[1]} (must be 1–100)`);
+      render.status("usage: /auto <goal> [--max-steps N]");
+      return;
+    }
+    maxSteps = parsed;
+  }
+  if (!goal) {
+    render.error("usage: /auto <goal> [--max-steps N]");
     return;
   }
-  await ctx.runAutoMode(arg);
+  await ctx.runAutoMode(goal, maxSteps);
   ctx.logCommand(`/auto ${arg}`);
 }
 
