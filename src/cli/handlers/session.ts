@@ -74,6 +74,16 @@ export async function handleAuto(ctx: ReplContext, arg: string): Promise<void> {
 }
 
 // ===================================================================
+// /debug
+// ===================================================================
+
+export async function handleDebug(ctx: ReplContext): Promise<void> {
+  ctx.state.debugEnabled = !ctx.state.debugEnabled;
+  render.success(`debug mode ${ctx.state.debugEnabled ? "on" : "off"}`);
+  ctx.logCommand("/debug");
+}
+
+// ===================================================================
 // /clear
 // ===================================================================
 

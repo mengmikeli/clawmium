@@ -18,6 +18,7 @@
     "test:stash-eval": "tsx src/__test__stash_eval.ts",
     "test:auto": "tsx src/__test__auto.ts",
     "test:repl": "tsx src/__test__repl.ts",
+    "test:aria": "tsx src/__test__aria.ts",
     "clm": "tsx src/index.ts"
   },
   "keywords": [],

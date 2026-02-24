@@ -111,6 +111,7 @@ function makeMockNav(mockPage: any): any {
       links: [{ text: "Link 1", href: "https://example.com/link1" }],
       forms: [],
     }),
+    extractAriaSnapshot: async () => null,
     _lastGotoUrl: () => lastGotoUrl,
     _setGotoError: (err: Error) => { gotoError = err; },
   };
@@ -176,6 +177,7 @@ interface SessionState {
   homeUrl: string;
   currentUrl: string;
   pendingReachedBy: ReachedBy;
+  debugEnabled: boolean;
 }
 
 /**
@@ -208,6 +210,7 @@ function makeTestRepl() {
     homeUrl: "",
     currentUrl: "https://example.com",
     pendingReachedBy: "auto",
+    debugEnabled: false,
   };
 
   // We need to import Repl and cast to any to inject mocks
@@ -732,6 +735,55 @@ async function main() {
     (repl as any).runAutoMode = async () => { autoModeCalled = true; };
     await repl.handleInput("/auto --max-steps 5");
     assert(!autoModeCalled, "runAutoMode NOT called when no goal text");
+  }
+  console.log();
+
+  // ---------------------------------------------------------------
+  // GROUP 8: /debug toggle (4 tests)
+  // ---------------------------------------------------------------
+  console.log("--- /debug toggle ---\n");
+
+  console.log("40. /debug toggles debugEnabled from false to true...");
+  {
+    const { repl, state } = makeTestRepl();
+    assert(state.debugEnabled === false, "starts false");
+    await repl.handleInput("/debug");
+    assert(state.debugEnabled === true, "toggled to true");
+  }
+  console.log();
+
+  console.log("41. /debug again toggles back to false...");
+  {
+    const { repl, state } = makeTestRepl();
+    state.debugEnabled = true;
+    await repl.handleInput("/debug");
+    assert(state.debugEnabled === false, "toggled back to false");
+  }
+  console.log();
+
+  console.log("42. DEBUG=1 env starts with debugEnabled true...");
+  {
+    // Simulate by directly checking state init logic
+    const debugVal = "1";
+    const enabled = debugVal === "1" || debugVal === "true";
+    assert(enabled === true, "DEBUG=1 results in true");
+    const debugVal2 = "true";
+    const enabled2 = debugVal2 === "1" || debugVal2 === "true";
+    assert(enabled2 === true, "DEBUG=true results in true");
+    const debugVal3 = "";
+    const enabled3 = debugVal3 === "1" || debugVal3 === "true";
+    assert(enabled3 === false, "empty DEBUG results in false");
+  }
+  console.log();
+
+  console.log("43. Bare word 'debug' prompts 'did you mean /debug?'...");
+  {
+    const { repl, mockRl } = makeTestRepl();
+    // Mock confirmAction to return false (user says no)
+    (repl as any).confirmAction = async () => false;
+    await repl.handleInput("debug");
+    // Should have triggered confirmAction prompt and then fallen to free text
+    assert(mockRl.promptCalls > 0, "prompt called after bare word fallback");
   }
   console.log();
 

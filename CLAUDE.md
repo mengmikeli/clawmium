@@ -35,7 +35,7 @@ clawmium/
 │   ├── index.ts             # Entry point — CLI arg parsing, provider setup, default URL
 │   ├── browser/
 │   │   ├── engine.ts        # BrowserEngine — launch/show/hide (cookie transfer), isAlive/recover
-│   │   ├── navigator.ts     # PageNavigator — goto (timeout fallback), extractContent, goBack
+│   │   ├── navigator.ts     # PageNavigator — goto (timeout fallback), extractContent, extractAriaSnapshot, goBack
 │   │   ├── network.ts       # NetworkInterceptor — same-origin JSON capture, findRichContent
 │   │   ├── __test__.ts      # Manual browser integration test
 │   │   └── __test__recover.ts # Automated recovery + detection tests (14 tests, no deps)
@@ -64,7 +64,7 @@ clawmium/
 │   │   ├── handler-types.ts # SessionState, ReplContext, CommandHandler, HandlerResult types
 │   │   ├── handlers/
 │   │   │   ├── navigation.ts # /show, /hide, /goto, /back, /forward, /refresh, /home, /demo (8 commands)
-│   │   │   ├── session.ts   # /save, /quit, /url, /help, /login, /auto, /clear (7 commands)
+│   │   │   ├── session.ts   # /save, /quit, /url, /help, /login, /auto, /debug, /clear (8 commands)
 │   │   │   └── crawl.ts     # /tree, /stack, /history, /crawl (4 commands with subcommands)
 │   │   ├── renderer.ts      # ANSI terminal output (banner, contentBox, navSummary, progress, dataTable, commentThread, choices, status lines)
 │   │   └── goals.ts         # Pure functions: formatGoal(), addBreadcrumb()
@@ -80,7 +80,8 @@ clawmium/
 │   ├── __test__crawl_phase4.ts  # Crawl command layer + display (31 assertions)
 │   ├── __test__repl.ts          # REPL command handler tests — mock factories, 53 assertions
 │   ├── __test__session.ts       # Session persistence — cursor, metadata, stash, save/load (149 assertions)
-│   └── __test__stash_eval.ts    # Stash eval — cross-domain stash correctness (86 assertions)
+│   ├── __test__stash_eval.ts    # Stash eval — cross-domain stash correctness (86 assertions)
+│   └── __test__aria.ts          # A11y tree extraction, ref-based execution (29 assertions)
 │
 ├── cityserve/               # Mock government website (CityServe)
 │   ├── server.ts            # Express server
@@ -127,9 +128,10 @@ Human (terminal)  →  CLM REPL  →  LLM (interpret page, extract data)
 2. For each page:
    a. Network interceptor passively captures same-origin JSON responses
    b. DOM content extracted (title, visible text, links, forms)
+   b2. A11y tree extracted via Playwright's `_snapshotForAI()` — YAML with `[ref=...]` identifiers on interactive elements (graceful fallback to null)
    c. If sparse DOM content (<500 chars), try network JSON for article text, then scroll-to-load
-   d. Page content sent to LLM with user's goal and conversation context
-   e. LLM returns content-first interpretation: summary of what the page *says*, plus navigation choices
+   d. Page content + a11y tree sent to LLM with user's goal and conversation context
+   e. LLM returns content-first interpretation: summary of what the page *says*, plus navigation choices with `ref` identifiers (CSS selectors as fallback)
    f. CLI renders summary (content box for articles, navSummary for navigation pages) then numbered choices
 3. Human selects choices, types free-text questions, or uses slash commands
 4. Free-text input gets answered as a follow-up using previous summary as conversation context
@@ -296,7 +298,7 @@ interface ReplContext {
 
 **Handler files** (`src/cli/handlers/`):
 - `navigation.ts` — 8 commands: `/show`, `/hide`, `/goto`, `/back`, `/forward`, `/refresh`, `/home`, `/demo`
-- `session.ts` — 7 commands: `/save`, `/quit`, `/url`, `/help`, `/login`, `/auto`, `/clear`
+- `session.ts` — 8 commands: `/save`, `/quit`, `/url`, `/help`, `/login`, `/auto`, `/debug`, `/clear`
 - `crawl.ts` — 4 commands with subcommands: `/tree`, `/stack`, `/history`, `/crawl`
 
 **`navigateAndProcess()`**: Private method on `Repl` that owns the single navigation transaction — syncBrowser → truncateCursorForward → interceptor.clear → pendingReachedBy → preNavigate hook → nav.goto (try/catch) → currentUrl → settle → processCurrentPage. All navigation handlers call this instead of duplicating the sequence. Accepts an optional `preNavigate` callback for pre-navigation state changes (e.g., `/home` resets goalContext).
@@ -327,6 +329,9 @@ MAX_TOKENS_EXTRACT=1024
 
 # Auto mode step limit (optional — default: 10)
 AUTO_MAX_STEPS=10
+
+# Debug mode — inline diagnostic output (default: off)
+# DEBUG=1
 ```
 
 Token limits are configurable per method via environment variables. Both providers read from `process.env` at call time via a shared `tokenLimit(envVar, fallback)` helper. The `interpret` default was raised from 1024 to 2048 to allow richer summaries; `plan` and `extract` keep their original defaults.
@@ -350,6 +355,7 @@ Token limits are configurable per method via environment variables. Both provide
 | `/crawl` | Manage crawls: list, load, rename, end, info |
 | `/clear` | Reset state: repl, crawl, browser, or all (crawl auto-saves) |
 | `/auto <goal> [--max-steps N]` | Autonomous browsing loop — interpret → plan → execute until goal met or limit hit |
+| `/debug` | Toggle inline debug output (LLM I/O, a11y, execution paths) |
 | `/demo` | Run CityServe demo (localhost:3000, goal: "check my water bill") |
 | `/quit` | Save and exit |
 | `/help` | Show command list |
@@ -430,6 +436,7 @@ npm run test:session       # Session persistence — cursor, metadata, stash, sa
 npm run test:stash-eval    # Stash eval — cross-domain stash correctness (86 assertions)
 npm run test:auto          # Auto mode — runner, executor, plan parsing (63 assertions)
 npm run test:repl          # REPL command handlers — mock factories, dispatch (53 assertions)
+npm run test:aria          # A11y tree extraction, ref-based execution (29 assertions)
 ```
 
 ## File Output
@@ -464,7 +471,7 @@ Every async operation has a fallback chain:
 | Navigation errors | Network (`net::` / `NS_ERROR_`) → "could not reach" message | HTTP status ≥ 400 → "returned HTTP {status}" message | All nav paths use `navigateAndProcess()` which catches and displays |
 | Content extraction | Intercepted network JSON | Scroll-to-load + re-extract DOM | Sparse content warning |
 | Browser state | `syncBrowser()` 3-point check (alive? responsive? correct URL?) | `recoverBrowser()` — relaunch headless | Error message to user |
-| Click navigation | `page.click(selector)` | Get `href` and `nav.goto()` | Detect anchor link, skip |
+| Click navigation | `aria-ref` locator (from a11y tree) | `page.click(selector)` / `href` + `nav.goto()` | Detect anchor link, skip |
 | Auth handoff | CLI credential entry | Retry up to 3 times | Cancel and return to prompt |
 | LLM calls | 30s timeout + AbortController | CancelledError on Ctrl+C | Error message to user |
 
@@ -504,3 +511,5 @@ The original design spec (pre-implementation) is preserved at `learnings/2026-02
 - **`/auto` mode — autonomous browsing (2026-02-17)** — `/auto <goal>` drives the browser autonomously: interpret page → `planAutoAction()` (new LLM method, operates on numbered choices not selectors) → `executeChoice()` → loop. Terminal conditions: data found, step limit (configurable via `--max-steps N` / `-s N` CLI flag or `AUTO_MAX_STEPS` env var, default 10), loop detection (same URL visited twice), consecutive errors (2), Ctrl+C abort, or `ask_human`. Precedence: CLI flag > `.env` > hardcoded default. New `src/auto/` module: `executor.ts` (shared `executeChoice()` extracted from REPL — first concrete REPL refactor step), `runner.ts` (autonomous loop as implicit state machine). CityServe SPA auth fix (interceptor clear + 500ms settle delay). New `AutoPlanResult` type + `planAutoAction()` on `LLMProvider` interface. 63 unit assertions + E2E integration test. See `learnings/2026-02-17-5.md`.
 - **REPL refactor Phases 0–2 (2026-02-18)** — Three-phase structural refactor of `repl.ts` (2134→1596 lines). Phase 0: safety net test suite (`__test__repl.ts`, 53 assertions) with mock factories for Page, Engine, Navigator, LLM, Interceptor, readline. Phase 1: `navigateAndProcess()` extraction — single 30-line method owning the 8-step navigation transaction (syncBrowser → truncateCursorForward → interceptor.clear → pendingReachedBy → preNavigate hook → nav.goto → currentUrl → processCurrentPage), replacing 4 duplicated inline sequences. Phase 2: command handler extraction — `SessionState` moved to `handler-types.ts`, 19 switch/case branches replaced with dispatch map routing to 3 handler files (`handlers/navigation.ts` 226 lines/8 commands, `handlers/session.ts` 105 lines/7 commands, `handlers/crawl.ts` 263 lines/4 commands). `handleInput()` reduced from ~784 lines to ~10-line dispatcher + ~150 lines for choice/free-text. `rl.prompt()` calls reduced from 58→15. `ReplContext` dependency bag (22 bound methods + 8 field accesses) makes handler coupling explicit. 534 total assertions across 7 suites, 0 failures. See `learnings/2026-02-18-0.md`.
 - **`/auto` configurable step limit (2026-02-18)** — Step limit was hardcoded at 10. Added `--max-steps N` / `-s N` CLI flag on `/auto` command + `AUTO_MAX_STEPS` env var. Precedence: CLI flag > `.env` > hardcoded default (10). Bounds validated 1–100. Flag parsing in `handleAuto()`, env reading in `runAutoMode()`, type propagated through `ReplContext`. 10 new test assertions (7 test cases). See `learnings/2026-02-18-2.md`.
+- **A11y tree extraction (2026-02-24)** — Added accessibility tree as parallel content source alongside DOM text. `PageNavigator.extractAriaSnapshot()` uses Playwright's private `_snapshotForAI()` API to get YAML a11y tree with `[ref=...]` identifiers on interactive elements. `AriaSnapshot` type added to `navigator.ts`. `buildPageText()` appends truncated (6000 char) a11y tree section. LLM prompt updated to emit `ref` fields on choices (with CSS `selector` as fallback). `executeChoice()` tries `aria-ref=` locator first, falls back to CSS selector, then href extraction. All `ref` fields optional — backward compatible with existing sessions. `PageInterpretation.choices` gains `ref?`, `fillPlan` gains `ref?`/`submitRef?`. New test suite: `__test__aria.ts` (29 assertions). 592 total assertions across 9 suites, 0 failures. Files changed: `navigator.ts`, `provider.ts`, `prompts.ts`, `repl.ts`, `executor.ts`, `__test__aria.ts`, `__test__repl.ts`, `__test__auto.ts`, `package.json`, `CLAUDE.md`.
+- **Debug mode (2026-02-24)** — `/debug` toggle + `DEBUG=1` env var for inline diagnostic output at key decision points. Shows: page extraction stats (`[dbg:page]`), a11y snapshot size (`[dbg:a11y]`), LLM input/output details (`[dbg:llm]`), choice execution path (`[dbg:exec]`), browser sync status (`[dbg:sync]`), auto planner output (`[dbg:auto]`). All output dim gray via `render.debug(label, msg)`. `debugEnabled: boolean` on `SessionState` (ephemeral, not persisted). Optional `debug` callback on `ExecutionDeps` and `AutoDeps`. 7 new test assertions. Files changed: `renderer.ts`, `handler-types.ts`, `repl.ts`, `handlers/session.ts`, `executor.ts`, `runner.ts`, `__test__repl.ts`, `.env.example`, `CLAUDE.md`.

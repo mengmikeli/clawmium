@@ -5,7 +5,7 @@ Respond with ONLY valid JSON matching this schema:
   "pageType": "navigation" | "content" | "login" | "form" | "data" | "confirmation",
   "summary": "A meaningful summary of the page's ACTUAL CONTENT — not just its structure",
   "choices": [
-    { "index": 1, "label": "Human-readable label", "action": "click" | "navigate" | "fill", "selector": "CSS selector if clicking", "url": "URL if navigating", "fillPlan": { "inputSelector": "CSS selector", "submitAction": "enter" | "click", "submitSelector": "CSS selector" } }
+    { "index": 1, "label": "Human-readable label", "action": "click" | "navigate" | "fill", "ref": "s1e2", "selector": "CSS selector if clicking", "url": "URL if navigating", "fillPlan": { "inputSelector": "CSS selector", "ref": "s1e3", "submitAction": "enter" | "click", "submitSelector": "CSS selector", "submitRef": "s1e4" } }
   ],
   "dataFound": null or { ...extracted key-value data from the page... },
   "requiresAuth": true/false,
@@ -25,7 +25,12 @@ Rules:
 - For "content" pages: put the main content summary in "summary". Only include navigation choices that lead to OTHER content (not navbar/sidebar chrome like Home, About, Archives, Categories, Login).
 - For "navigation" pages: list the main content links as choices. Exclude generic site chrome (nav bars, footers, login links) unless they are directly relevant to the user's goal.
 - Keep choice labels short and descriptive
-- Use the most specific CSS selector available (prefer a[href="..."] for links)
+- ELEMENT TARGETING: When an "Accessibility tree" section is provided in the page content, use [ref=...] identifiers for element targeting:
+  - Set the "ref" field on choices to the ref value from the accessibility tree (e.g. "s1e5" from [ref=s1e5])
+  - Also set "selector" as a CSS fallback (prefer a[href="..."] for links)
+  - For fillPlan: set "ref" for the input element and "submitRef" for the submit button, alongside CSS selectors
+  - When NO accessibility tree is provided, use CSS selectors only (omit ref fields)
+- The accessibility tree uses YAML format: indentation = parent-child structure, roles (link, button, heading, textbox, navigation, main...), names in quotes (link "Sign In"), ref identifiers ([ref=s1e2])
 - Index choices starting at 1
 - Limit choices to the 10 most relevant options
 - If the visible text is empty or very short, set summary to "Page content is empty (possible anti-bot protection, paywall, or lazy loading)" and return empty choices. Do NOT guess or fabricate content from the URL alone.

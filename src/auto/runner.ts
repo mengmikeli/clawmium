@@ -40,6 +40,7 @@ export interface AutoDeps {
   getEnrichedTree: () => string | null;
   getCurrentUrl: () => string;
   getCurrentTitle: () => string;
+  debug?: (label: string, msg: string) => void;
 }
 
 const DEFAULT_CONFIG: AutoConfig = {
@@ -182,6 +183,8 @@ export async function runAuto(
     render.progressDone();
 
     // 7. Handle plan result
+    deps.debug?.("auto", `plan: ${JSON.stringify(plan).slice(0, 150)}`);
+
     if (plan.type === "extract") {
       // Agent thinks current page has the data — try extraction from page content
       render.autoStep(step, cfg.maxSteps, "extract", plan.reasoning);

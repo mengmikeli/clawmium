@@ -3,7 +3,7 @@ import { ChildProcess, spawn } from "child_process";
 import * as path from "path";
 import * as http from "http";
 import { BrowserEngine } from "../browser/engine";
-import { PageNavigator, PageContent } from "../browser/navigator";
+import { PageNavigator, PageContent, AriaSnapshot } from "../browser/navigator";
 import { NetworkInterceptor } from "../browser/network";
 import { detectLoginPage } from "../auth/detector";
 import { DetectedForm, detectInteractiveForms } from "../forms/detector";
@@ -24,7 +24,7 @@ import { SessionState, ReplContext, CommandHandler, NavigateOpts } from "./handl
 
 // Command handler imports
 import { handleShow, handleHide, handleGoto, handleBack, handleForward, handleRefresh, handleHome, handleDemo } from "./handlers/navigation";
-import { handleSave, handleQuit, handleUrl, handleHelp, handleLogin, handleAuto, handleClear } from "./handlers/session";
+import { handleSave, handleQuit, handleUrl, handleHelp, handleLogin, handleAuto, handleClear, handleDebug } from "./handlers/session";
 import { handleTree, handleStack, handleHistory, handleCrawl } from "./handlers/crawl";
 
 const LLM_TIMEOUT = 30_000; // 30s timeout for LLM calls
@@ -45,6 +45,7 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   help: handleHelp,
   login: handleLogin,
   auto: handleAuto,
+  debug: handleDebug,
   clear: handleClear,
   tree: handleTree,
   stack: handleStack,
@@ -112,6 +113,7 @@ export class Repl {
       homeUrl: config.homeUrl || "",
       currentUrl: "",
       pendingReachedBy: "auto",
+      debugEnabled: process.env.DEBUG === "1" || process.env.DEBUG === "true",
     };
   }
 
@@ -262,6 +264,7 @@ export class Repl {
   private async syncBrowser(): Promise<void> {
     // 1. Is browser alive?
     if (!this.engine.isAlive()) {
+      if (this.state.debugEnabled) render.debug("sync", "alive=no → recovering browser");
       await this.recoverBrowser();
       return;
     }
@@ -271,12 +274,15 @@ export class Repl {
     try {
       browserUrl = await this.engine.getPage().evaluate(() => window.location.href);
     } catch {
+      if (this.state.debugEnabled) render.debug("sync", "alive=yes  responsive=no → recovering browser");
       await this.recoverBrowser();
       return;
     }
 
     // 3. Is browser on the right URL?
-    if (this.state.currentUrl && browserUrl !== this.state.currentUrl) {
+    const urlMatch = !this.state.currentUrl || browserUrl === this.state.currentUrl;
+    if (this.state.debugEnabled) render.debug("sync", `alive=yes  responsive=yes  url_match=${urlMatch ? "yes" : "no"}`);
+    if (!urlMatch) {
       this.interceptor.clear();
       await this.nav.goto(this.state.currentUrl);
     }
@@ -470,11 +476,21 @@ export class Repl {
 
     // Extract page content
     const content = await this.nav.extractContent();
+    const ariaSnapshot = await this.nav.extractAriaSnapshot();
     this.state.lastPageTitle = content.title;
     this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
     this.state.pendingReachedBy = "auto";
     render.progress(`loading "${content.title}"...`);
     this.logAgent(`Page loaded: "${content.title}" at ${content.url}`);
+
+    if (this.state.debugEnabled) {
+      render.debug("page", `url=${this.state.currentUrl}  title="${content.title}"`);
+      render.debug("page", `visible_text=${content.text.length} chars  links=${content.links.length}  forms=${content.forms.length}`);
+      if (ariaSnapshot) {
+        const refCount = (ariaSnapshot.yaml.match(/\[ref=/g) || []).length;
+        render.debug("a11y", `snapshot=${ariaSnapshot.yaml.length} chars (${refCount} interactive elements)`);
+      }
+    }
 
     // Check for intercepted API data relevant to the user's goal
     const apiData = this.findRelevantApiData();
@@ -486,25 +502,32 @@ export class Repl {
 
     // Agent-first: if DOM content is sparse, check intercepted network
     // responses for rich text content (article bodies, etc.)
-    let pageText = this.buildPageText(content);
+    let pageText = this.buildPageText(content, ariaSnapshot?.yaml);
     const visibleTextLen = content.text.trim().length;
 
     if (visibleTextLen < 500) {
       const richContent = this.interceptor.findRichContent();
       if (richContent) {
         render.progress("extracting content...");
-        pageText = [
+        const richSections = [
           `Title: ${content.title}`,
           `URL: ${content.url}`,
           `\nContent (from network):`,
           richContent.slice(0, 8000),
-        ].join("\n");
+        ];
+        if (ariaSnapshot?.yaml) {
+          const truncated = ariaSnapshot.yaml.length > 6000
+            ? ariaSnapshot.yaml.slice(0, 6000) + "\n... (truncated)"
+            : ariaSnapshot.yaml;
+          richSections.push(`\nAccessibility tree:\n${truncated}`);
+        }
+        pageText = richSections.join("\n");
       } else {
         // Fallback: scroll to trigger lazy loading
         await this.scrollToLoad();
         const reloaded = await this.nav.extractContent();
         if (reloaded.text.trim().length > visibleTextLen) {
-          pageText = this.buildPageText(reloaded);
+          pageText = this.buildPageText(reloaded, ariaSnapshot?.yaml);
           render.progress("loading content...");
         }
       }
@@ -513,6 +536,10 @@ export class Repl {
     const ancestorCtx = formatAncestorContext(this.crawlManager);
     const conversationCtx = this.state.goalContext.activeIntent || undefined;
     const fullCtx = [ancestorCtx, conversationCtx].filter(Boolean).join("\n\n") || undefined;
+    if (this.state.debugEnabled) {
+      render.debug("llm", `input=${pageText.length} chars  goal="${this.formatGoal()}"`);
+      if (fullCtx) render.debug("llm", `context=${fullCtx.slice(0, 120)}${fullCtx.length > 120 ? "..." : ""}`);
+    }
     const interpretation = await withTimeout(
       this.llm.interpret(pageText, this.formatGoal(), fullCtx),
       LLM_TIMEOUT,
@@ -523,6 +550,19 @@ export class Repl {
     this.setInterpretation(interpretation);
     this.storeStateOnNode(interpretation);
     this.maybeNameCrawl(interpretation.summary);
+
+    if (this.state.debugEnabled) {
+      const i = interpretation;
+      render.debug("llm", `output  pageType=${i.pageType}  choices=${i.choices.length}  dataFound=${i.dataFound ? "yes" : "no"}  requiresAuth=${i.requiresAuth}`);
+      for (const c of i.choices.slice(0, 5)) {
+        const parts = [`"${c.label}"`, `action=${c.action}`];
+        if (c.ref) parts.push(`ref=${c.ref}`);
+        if (c.selector) parts.push(`selector=${c.selector.slice(0, 40)}`);
+        if (c.url) parts.push(`url=${c.url.slice(0, 60)}`);
+        render.debug("llm", `choice[${c.index}] ${parts.join("  ")}`);
+      }
+      if (i.choices.length > 5) render.debug("llm", `... and ${i.choices.length - 5} more choices`);
+    }
 
     // Render based on interpretation
     if (interpretation.dataFound) {
@@ -602,7 +642,7 @@ export class Repl {
     }
 
     // Command-like input detection — prompt if user typed a bare command name
-    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "history", "tree", "clear", "crawl", "auto"];
+    const knownCommands = ["show", "hide", "goto", "back", "forward", "save", "quit", "help", "demo", "refresh", "login", "home", "url", "stack", "history", "tree", "clear", "crawl", "auto", "debug"];
     const lowerInput = input.toLowerCase();
     if (knownCommands.includes(lowerInput) || knownCommands.some(c => lowerInput.startsWith(c + " "))) {
       const confirmed = await this.confirmAction(`did you mean /${lowerInput}?`);
@@ -707,13 +747,18 @@ export class Repl {
 
     await this.syncBrowser();
     const content = await this.nav.extractContent();
-    const pageText = this.buildPageText(content);
+    const ariaSnapshot = await this.nav.extractAriaSnapshot();
+    const pageText = this.buildPageText(content, ariaSnapshot?.yaml);
     render.progress("thinking...");
 
     // Build conversation context from previous summary + user question
     let conversationContext: string | undefined;
     if (this.state.currentInterpretation) {
       conversationContext = `Previous summary: ${this.state.currentInterpretation.summary}\nUser asks: ${input}`;
+    }
+
+    if (this.state.debugEnabled) {
+      render.debug("llm", `follow-up input=${pageText.length} chars  context="${(conversationContext || "").slice(0, 100)}${(conversationContext || "").length > 100 ? "..." : ""}"`);
     }
 
     const interpretation = await withTimeout(
@@ -814,9 +859,19 @@ export class Repl {
 
     // Extract page content
     const content = await this.nav.extractContent();
+    const ariaSnapshot = await this.nav.extractAriaSnapshot();
     this.state.lastPageTitle = content.title;
     this.trackNavigation(this.state.currentUrl, this.state.lastPageTitle, this.state.pendingReachedBy);
     this.state.pendingReachedBy = "auto";
+
+    if (this.state.debugEnabled) {
+      render.debug("page", `url=${this.state.currentUrl}  title="${content.title}"`);
+      render.debug("page", `visible_text=${content.text.length} chars  links=${content.links.length}  forms=${content.forms.length}`);
+      if (ariaSnapshot) {
+        const refCount = (ariaSnapshot.yaml.match(/\[ref=/g) || []).length;
+        render.debug("a11y", `snapshot=${ariaSnapshot.yaml.length} chars (${refCount} interactive elements)`);
+      }
+    }
 
     // Check for intercepted API data
     const apiData = this.findRelevantApiData();
@@ -836,23 +891,30 @@ export class Repl {
     }
 
     // Build page text (with rich content fallback)
-    let pageText = this.buildPageText(content);
+    let pageText = this.buildPageText(content, ariaSnapshot?.yaml);
     const visibleTextLen = content.text.trim().length;
 
     if (visibleTextLen < 500) {
       const richContent = this.interceptor.findRichContent();
       if (richContent) {
-        pageText = [
+        const richSections = [
           `Title: ${content.title}`,
           `URL: ${content.url}`,
           `\nContent (from network):`,
           richContent.slice(0, 8000),
-        ].join("\n");
+        ];
+        if (ariaSnapshot?.yaml) {
+          const truncated = ariaSnapshot.yaml.length > 6000
+            ? ariaSnapshot.yaml.slice(0, 6000) + "\n... (truncated)"
+            : ariaSnapshot.yaml;
+          richSections.push(`\nAccessibility tree:\n${truncated}`);
+        }
+        pageText = richSections.join("\n");
       } else {
         await this.scrollToLoad();
         const reloaded = await this.nav.extractContent();
         if (reloaded.text.trim().length > visibleTextLen) {
-          pageText = this.buildPageText(reloaded);
+          pageText = this.buildPageText(reloaded, ariaSnapshot?.yaml);
         }
       }
     }
@@ -860,6 +922,10 @@ export class Repl {
     const ancestorCtx = formatAncestorContext(this.crawlManager);
     const conversationCtx = this.state.goalContext.activeIntent || undefined;
     const fullCtx = [ancestorCtx, conversationCtx].filter(Boolean).join("\n\n") || undefined;
+    if (this.state.debugEnabled) {
+      render.debug("llm", `input=${pageText.length} chars  goal="${this.formatGoal()}"`);
+      if (fullCtx) render.debug("llm", `context=${fullCtx.slice(0, 120)}${fullCtx.length > 120 ? "..." : ""}`);
+    }
     const interpretation = await withTimeout(
       this.llm.interpret(pageText, this.formatGoal(), fullCtx),
       LLM_TIMEOUT,
@@ -870,6 +936,11 @@ export class Repl {
     this.storeStateOnNode(interpretation);
     this.maybeNameCrawl(interpretation.summary);
     this.appendSystemChoices(interpretation);
+
+    if (this.state.debugEnabled) {
+      const i = interpretation;
+      render.debug("llm", `output  pageType=${i.pageType}  choices=${i.choices.length}  dataFound=${i.dataFound ? "yes" : "no"}  requiresAuth=${i.requiresAuth}`);
+    }
 
     return interpretation;
   }
@@ -952,6 +1023,7 @@ export class Repl {
       getEnrichedTree: () => this.crawlManager.getEnrichedDisplayTree(),
       getCurrentUrl: () => this.state.currentUrl,
       getCurrentTitle: () => this.state.lastPageTitle,
+      debug: this.state.debugEnabled ? (label: string, msg: string) => render.debug(label, msg) : undefined,
     };
 
     const result = await runAuto(goal, deps, effectiveMaxSteps ? { maxSteps: effectiveMaxSteps } : undefined, autoAbort.signal);
@@ -996,6 +1068,7 @@ export class Repl {
       setPendingReachedBy: (rb: string) => { this.state.pendingReachedBy = rb as ReachedBy; },
       crawlManager: this.crawlManager,
       interceptor: this.interceptor,
+      debug: this.state.debugEnabled ? (label: string, msg: string) => render.debug(label, msg) : undefined,
     };
   }
 
@@ -1335,8 +1408,8 @@ export class Repl {
     }
   }
 
-  private buildPageText(content: PageContent): string {
-    return [
+  private buildPageText(content: PageContent, ariaYaml?: string | null): string {
+    const sections = [
       `Title: ${content.title}`,
       `URL: ${content.url}`,
       `\nVisible text:\n${content.text}`,
@@ -1347,7 +1420,14 @@ export class Repl {
         (f) =>
           `  - Form(id="${f.id}", action="${f.action}", inputs: ${f.inputs.map((i) => i.name || i.type).join(", ")})`
       ),
-    ].join("\n");
+    ];
+    if (ariaYaml) {
+      const truncated = ariaYaml.length > 6000
+        ? ariaYaml.slice(0, 6000) + "\n... (truncated)"
+        : ariaYaml;
+      sections.push(`\nAccessibility tree:\n${truncated}`);
+    }
+    return sections.join("\n");
   }
 
   private logAgent(msg: string): void {

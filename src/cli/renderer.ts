@@ -8,6 +8,10 @@ const CYAN = "\x1b[36m";
 const WHITE = "\x1b[37m";
 const BOLD = "\x1b[1m";
 
+export function debug(label: string, msg: string): void {
+  console.log(`${DIM}[dbg:${label}]  ${msg}${RESET}`);
+}
+
 export function status(msg: string): void {
   console.log(`${DIM}→ ${msg}${RESET}`);
 }
@@ -216,6 +220,7 @@ export function help(): void {
   console.log(`  ${CYAN}/crawl${RESET}         Manage crawls (list, load, rename, end, info)`);
   console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
   console.log(`  ${CYAN}/auto <goal>${RESET}   Agent drives browser toward a goal`);
+  console.log(`  ${CYAN}/debug${RESET}          Toggle debug output`);
   console.log(`  ${CYAN}/demo${RESET}          Run CityServe demo`);
   console.log(`  ${CYAN}/quit${RESET}          End session`);
   console.log(`  ${CYAN}/help${RESET}          Show this help`);

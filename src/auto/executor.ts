@@ -18,6 +18,7 @@ export interface ExecutionDeps {
   setPendingReachedBy: (reachedBy: string) => void;
   crawlManager: CrawlManager;
   interceptor: NetworkInterceptor;
+  debug?: (label: string, msg: string) => void;
 }
 
 export interface ExecuteResult {
@@ -60,27 +61,47 @@ export async function executeChoice(
     }
 
     const plan = choice.fillPlan;
+    deps.debug?.("exec", `fill: ${plan.ref ? `ref=${plan.ref}` : `selector=${plan.inputSelector}`}  value="${fillValue}"`);
     deps.crawlManager.truncateCursorForward();
 
     try {
-      await page.fill(plan.inputSelector, fillValue);
-      if (plan.submitAction === "click" && plan.submitSelector) {
-        await page.click(plan.submitSelector);
+      // Prefer ref-based locator, fall back to CSS selector
+      const inputLocator = plan.ref
+        ? page.locator(`aria-ref=${plan.ref}`)
+        : page.locator(plan.inputSelector);
+      await inputLocator.fill(fillValue);
+      if (plan.submitAction === "click" && (plan.submitRef || plan.submitSelector)) {
+        const submitLocator = plan.submitRef
+          ? page.locator(`aria-ref=${plan.submitRef}`)
+          : page.locator(plan.submitSelector!);
+        await submitLocator.click();
       } else {
-        await page.press(plan.inputSelector, "Enter");
+        await inputLocator.press("Enter");
       }
       await page.waitForLoadState("networkidle").catch(() => {});
       await page.waitForTimeout(500);
     } catch {
-      // Fallback: try form.submit() on the closest form
+      // Ref failed or locator failed — fallback to raw CSS selectors
       try {
-        await page.evaluate((sel: string) => {
-          const el = document.querySelector(sel);
-          const form = el?.closest("form") as HTMLFormElement | null;
-          form?.submit();
-        }, plan.inputSelector);
+        await page.fill(plan.inputSelector, fillValue);
+        if (plan.submitAction === "click" && plan.submitSelector) {
+          await page.click(plan.submitSelector);
+        } else {
+          await page.press(plan.inputSelector, "Enter");
+        }
         await page.waitForLoadState("networkidle").catch(() => {});
-      } catch { /* give up on submit — continue */ }
+        await page.waitForTimeout(500);
+      } catch {
+        // Fallback: try form.submit() on the closest form
+        try {
+          await page.evaluate((sel: string) => {
+            const el = document.querySelector(sel);
+            const form = el?.closest("form") as HTMLFormElement | null;
+            form?.submit();
+          }, plan.inputSelector);
+          await page.waitForLoadState("networkidle").catch(() => {});
+        } catch { /* give up on submit — continue */ }
+      }
     }
 
     let newUrl: string;
@@ -101,6 +122,7 @@ export async function executeChoice(
       return { navigated: false, anchorSkipped: true };
     }
 
+    deps.debug?.("exec", `navigating to url: ${choice.url.slice(0, 80)}`);
     deps.crawlManager.truncateCursorForward();
     await deps.nav.goto(choice.url);
     await page.waitForTimeout(500);
@@ -112,8 +134,40 @@ export async function executeChoice(
     return { navigated: true, newUrl };
   }
 
+  // Handle ref-based click (preferred over CSS selector)
+  if (choice.ref) {
+    deps.debug?.("exec", `trying ref: aria-ref=${choice.ref}`);
+    deps.crawlManager.truncateCursorForward();
+
+    try {
+      const loc = page.locator(`aria-ref=${choice.ref}`);
+      const href = await loc.getAttribute("href").catch(() => null);
+      if (href && (href.startsWith("#") || href === "")) {
+        return { navigated: false, anchorSkipped: true };
+      }
+
+      await loc.click();
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await page.waitForTimeout(500);
+
+      let newUrl: string;
+      try { newUrl = deps.nav.currentUrl(); } catch { newUrl = deps.currentUrl(); }
+      deps.setCurrentUrl(newUrl);
+      deps.setPendingReachedBy("choice");
+      deps.debug?.("exec", `ref click succeeded → ${newUrl.slice(0, 80)}`);
+      return { navigated: true, newUrl };
+    } catch {
+      // Ref click failed — fall through to selector/url paths below
+      deps.debug?.("exec", `ref click failed, falling back to ${choice.selector ? "selector" : choice.url ? "url" : "nothing"}`);
+      if (!choice.selector && !choice.url) {
+        return { navigated: false, error: "ref click failed and no fallback" };
+      }
+    }
+  }
+
   // Handle selector click
   if (choice.selector) {
+    deps.debug?.("exec", `trying selector: ${choice.selector.slice(0, 60)}`);
     deps.crawlManager.truncateCursorForward();
 
     try {
@@ -127,6 +181,7 @@ export async function executeChoice(
       await page.waitForLoadState("networkidle").catch(() => {});
     } catch {
       // Click failed — fallback to href + goto
+      deps.debug?.("exec", `selector click failed, trying href fallback`);
       const href = await page.getAttribute(choice.selector, "href").catch(() => null);
       if (href && !href.startsWith("#")) {
         const url = href.startsWith("http") ? href : `${deps.engine.getBaseUrl()}${href}`;
@@ -145,5 +200,5 @@ export async function executeChoice(
     return { navigated: true, newUrl };
   }
 
-  return { navigated: false, error: "choice has no url, selector, or fillPlan" };
+  return { navigated: false, error: "choice has no url, selector, ref, or fillPlan" };
 }

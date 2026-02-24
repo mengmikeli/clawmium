@@ -72,6 +72,7 @@ function makeMockNav(mockPage: any): any {
       links: [],
       forms: [],
     }),
+    extractAriaSnapshot: async () => null,
   };
 }
 

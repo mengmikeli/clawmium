@@ -12,6 +12,11 @@ export interface PageContent {
   }>;
 }
 
+export interface AriaSnapshot {
+  yaml: string;
+  timestamp: number;
+}
+
 export class PageNavigator {
   constructor(private page: Page) {}
 
@@ -115,5 +120,15 @@ export class PageNavigator {
 
   currentUrl(): string {
     return this.page.url();
+  }
+
+  async extractAriaSnapshot(timeoutMs = 10_000): Promise<AriaSnapshot | null> {
+    try {
+      const result = await (this.page as any)._snapshotForAI({ timeout: timeoutMs });
+      if (!result?.full) return null;
+      return { yaml: result.full, timestamp: Date.now() };
+    } catch {
+      return null;
+    }
   }
 }

@@ -5,13 +5,16 @@ export interface PageInterpretation {
     index: number;
     label: string;
     action: "click" | "navigate" | "fill";
+    ref?: string;
     selector?: string;
     url?: string;
     // Fill plan — LLM specifies how to interact with this form
     fillPlan?: {
       inputSelector: string;        // CSS selector for the primary input to fill
+      ref?: string;                 // @ref for input element (preferred over inputSelector)
       submitAction: "enter" | "click";  // press Enter on input, or click a button
       submitSelector?: string;      // CSS selector for submit button (when submitAction is "click")
+      submitRef?: string;           // @ref for submit button
     };
   }>;
   dataFound: Record<string, unknown> | null;
