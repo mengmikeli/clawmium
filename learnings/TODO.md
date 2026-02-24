@@ -1,38 +1,45 @@
 # TODO — Clawmium
 
-> Updated: 2026-02-18 (`/auto --max-steps` config complete)
+> Updated: 2026-02-24 (landscape alignment — agentic web infrastructure stack)
 
-## High
+## High Priority
 
-1. ~~Commit Phase 5 changes~~ — done (`ee22326`)
-2. ~~Wire form detection into REPL~~ — done (`ff96989`). Includes textarea support for Google, tautological label fix, navigator error handling, and 25 new test assertions.
-3. ~~**Crawl tree — Phase 1 (data structures + persistence)**~~ — done. `CrawlNode`, `Crawl`, `CrawlManager` in `src/crawl/`. Tree operations: create, find (dedup via nodeIndex), attach, detach, ancestors, display. Markdown persistence to `~/clm/crawls/`. All 113 tests passing.
-4. ~~**Crawl tree — Phase 2 (REPL hooks + /tree + /clear)**~~ — done. Hooked `addNavigation()` into all 10 REPL navigation paths via `pendingReachedBy` + `trackNavigation()`. Added `/tree` display command, `/clear` command with scopes (repl, crawl, browser, all) and auto-save.
-5. ~~**Split `/url` into `/url` + `/stack`**~~ — done (`e3b1fe4`). `/url` now prints just the current URL (one line). Old debug view (browser URL, sync status, back/forward stacks) moved to `/stack`.
-6. ~~**`/auto` mode spike**~~ — done. `/auto <goal>` drives autonomous browsing loop (interpret → planAutoAction → executeChoice). Stops on: data found, step limit, loop detection, consecutive errors, abort, or `ask_human`. `executeChoice()` extracted to `src/auto/executor.ts` (shared between human + auto paths — first REPL refactor extraction). 63 unit assertions + E2E test against CityServe. **Configurable step limit** added (2026-02-18): `--max-steps N` / `-s N` CLI flag + `AUTO_MAX_STEPS` env var. Precedence: CLI flag > `.env` > hardcoded default (10). See `learnings/2026-02-18-2.md`.
-7. **MCP server — design + prototype** — Clawmium is agent-first; agents need a programmatic interface. Design which tools to expose (browse, extract, click, fill, screenshot, tree context?). Build a minimal MCP server.
-19. ~~**REPL refactor Phases 0–2**~~ — done (`2026-02-18-0.md`). Phase 0: safety net tests (43→53 assertions after `/auto --max-steps` tests added). Phase 1: `navigateAndProcess()` extraction (single navigation transaction). Phase 2: command handler extraction (4 new files, 689 lines, dispatch map). `repl.ts` reduced from 2134→1596 lines, `rl.prompt()` from 58→15, `case` branches from 23→0. 534 total assertions, 0 failures.
+1. **A11y tree extraction** — Add Playwright `ariaSnapshot()` as parallel extraction alongside DOM text. DOM for content understanding, a11y tree for element targeting. Choices reference `@ref` identifiers instead of CSS selectors. Highest-impact extraction improvement. See `learnings/2026-02-24-0.md` Decision 1.
 
-## Medium
+2. **`Accept: text/markdown` header** — Add to Playwright requests. Cloudflare sites return clean markdown directly — skip DOM extraction when available. ~20 lines of code, large quality improvement. Content pipeline: markdown-first → DOM text → network JSON fallback. See Decision 4.
 
-8. ~~**Crawl tree — Phase 3 (LLM integration)**~~ — done. LLM-driven naming via `deriveCrawlName()`. Feed crawl ancestor context into `interpret()` calls via `formatAncestorContext()`. GoalContext breadcrumb derived from tree when crawl is active. All 48 crawl-llm tests passing.
-9. **Site quirks registry** — formalize the `sites/hn.ts` pattern. Generic HTML-standard core + site-specific overrides activated on demand (like browser extensions).
-10. ~~**`max_tokens` tuning**~~ — done. Configurable via `MAX_TOKENS_INTERPRET` / `MAX_TOKENS_PLAN` / `MAX_TOKENS_EXTRACT` env vars. Default interpret raised from 1024→2048. Both providers use shared `tokenLimit()` helper. Prompt updated: content pages get 3-6 sentence summaries, navigation 1-3 sentences.
-11. **Anthropic provider parity** — test with `conversationContext`, HN pages, form-heavy sites. Fix when it naturally comes up.
-20. **REPL refactor Phase 3 — non-command executors** — Extract choice execution (~80 lines) and free-text follow-up (~50 lines) from `handleInput()`. Would reduce it to pure dispatch. Self-contained, no dependencies.
+3. **Auth persistence architecture** — Dedicated design session for `storageState()` save/load per hostname. Questions: profile scoping (hostname vs origin), interaction with session resume, cookie expiry, security model, `/show`/`/hide` integration. Direction confirmed, details need review. See Decision 3.
 
-## Next Up — LLM Intelligence Focus
+## Medium Priority
 
-> Strategic checkpoint (2026-02-17): Infrastructure layer is solid. Shifting focus to LLM intelligence — richer interpret output, /auto mode, content extraction for hostile sites.
+4. **MCP server design** — Crawl artifacts as filesystem interface (tree/graph of markdown files), not a JSON API. External agents read curated markdown, not raw page content. Dedicated design session before implementation. See Decision 2.
 
-15. ~~**Crawl stash — preserve history across domains**~~ — done. Cross-domain `/goto` stashes active crawl. `/back` at crawl start pops stash. `/history` shows unified timeline. `SessionEnvelope` v3 persists stash. 86 stash eval assertions.
-16. **Persistent crawl artifacts — folder structure + LLM curation** — Evolve crawl persistence from flat `.md` files to named folders: `~/clm/crawls/{crawl-name}/README.md` (LLM-generated front page with summary, TODOs, directory) + per-page `.md` files. At persist time, LLM judges stashed crawls: **prune** (dead-end, no content → discard), **preserve** (standalone topic → own folder), **merge** (related crawls → combined folder, rewritten README). Session layer (stash) remains ephemeral; this is the durable knowledge layer.
-17. **Richer `interpret()` prompts** — Tune per page type: news articles extract claims/sources, HN threads surface consensus vs debate, documentation extracts key APIs. Current summaries are adequate but generic.
-18. **Content extraction for hostile sites** — Anti-bot sites return empty. Strategies: readability-style extraction, screenshot + vision model fallback.
+5. **Persistent crawl artifacts** — Evolve flat `.md` to named folders: `~/clm/crawls/{crawl-name}/README.md` + per-page `.md` files. LLM judges at persist time: prune/preserve/merge. Prerequisite for MCP vision (artifacts ARE the interface).
 
-## Low / Parked
+6. **REPL refactor Phase 3** — Extract choice execution (~80 lines) and free-text follow-up (~50 lines) from `handleInput()`. Would reduce it to pure dispatch. Self-contained, no dependencies.
 
-12. ~~**Crawl tree — Phase 4 (polish)**~~ — done. `/crawl` command with subcommands (list, load, rename, end, info). `peekCrawl()` for fast header-only reads. Enriched `/tree` display with summaries, ANSI colors, and reachedBy icons. Session log section in saved crawl markdown.
-13. **Crawl tree — Layer 3 (LLM reorganization)** — drift pruning, sub-tree detach/reattach, convergence detection. Future.
-14. ~~**Session persistence (REPL state)**~~ — done. `SessionEnvelope` JSON sidecar, auto-resume on startup, periodic auto-save (60s), 118 assertions.
-21. **REPL refactor Phases 4-5** — Deferred. Phase 4: session/crawl coordination boundary (extract stash orchestration + node restoration). Phase 5: prompt lifecycle normalization (centralize remaining 15 `rl.prompt()` calls). Wait for feature pressure.
+7. **Anthropic provider parity** — Test with conversationContext, HN pages, form-heavy sites. Fix when it naturally comes up.
+
+## Low Priority
+
+8. **Site skill files** — Reframe `sites/hn.ts` from hardcoded code to declarative domain skill files (like `.claude/skills/SKILL.md`). LLM reads skill file and adapts extraction. Scope depends on a11y tree adoption. See Decision 6.
+
+9. **Richer `interpret()` prompts** — Per page type: news extracts claims/sources, HN surfaces consensus/debate, docs extract key APIs. May be superseded by site skill files.
+
+10. **Content extraction for hostile sites** — Anti-bot sites return empty. Strategies: readability-style extraction, screenshot + vision model fallback.
+
+11. **Crawl Layer 3 (LLM reorganization)** — Drift pruning, sub-tree detach/reattach, convergence detection. Future.
+
+12. **REPL refactor Phases 4-5** — Session/crawl coordination boundary, prompt lifecycle normalization. Wait for feature pressure.
+
+## Completed
+
+- ~~Phase 5 changes~~ (HN, forms, goals)
+- ~~Wire form detection into REPL~~ (textarea, navigator errors)
+- ~~Crawl tree Phases 1-4~~ (data structures, REPL hooks, LLM integration, command layer)
+- ~~Split `/url` into `/url` + `/stack`~~
+- ~~`/auto` mode~~ (autonomous loop + configurable `--max-steps`)
+- ~~REPL refactor Phases 0-2~~ (safety net tests, navigateAndProcess, command handlers)
+- ~~`max_tokens` tuning~~ (configurable per method via env vars)
+- ~~Session persistence~~ (SessionEnvelope v3, auto-resume, auto-save)
+- ~~Crawl stash~~ (cross-domain history preservation)
