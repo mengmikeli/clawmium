@@ -1,6 +1,8 @@
 import { CrawlManager, ReachedBy } from "./crawl/tree";
 import { PageInterpretation, GoalContext } from "./llm/provider";
 import { DetectedForm } from "./forms/detector";
+import { setCrawlDir } from "./crawl/persistence";
+import { setSessionDir } from "./session/persistence";
 
 let passed = 0;
 let failed = 0;
@@ -788,6 +790,11 @@ async function main() {
   console.log();
 
   // ---------------------------------------------------------------
+  // Cleanup test directory
+  // ---------------------------------------------------------------
+  cleanup();
+
+  // ---------------------------------------------------------------
   // Summary
   // ---------------------------------------------------------------
   console.log("=".repeat(50));
@@ -797,6 +804,26 @@ async function main() {
   if (failed > 0) {
     process.exit(1);
   }
+}
+
+// Redirect disk writes to temp dir (runtime overrides, not env var — constants captured at import time)
+import * as os from "os";
+import * as path from "path";
+import * as fs from "fs";
+const TEST_DIR = path.join(os.tmpdir(), `clm-repl-test-${Date.now()}`);
+fs.mkdirSync(TEST_DIR, { recursive: true });
+setCrawlDir(TEST_DIR);
+setSessionDir(TEST_DIR);
+process.env.CLM_DIR = TEST_DIR; // writer.ts (saveConfig, saveData, saveSessionLog) respects env var
+
+function cleanup(): void {
+  try {
+    if (fs.existsSync(TEST_DIR)) {
+      fs.rmSync(TEST_DIR, { recursive: true });
+    }
+  } catch { /* best effort */ }
+  setCrawlDir(null);
+  setSessionDir(null);
 }
 
 // Silence render output during tests

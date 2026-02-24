@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ExtractedData } from "../llm/provider";
 
-const CLM_DIR = path.join(process.env.HOME || "~", "clm");
+const CLM_DIR = process.env.CLM_DIR || path.join(process.env.HOME || "~", "clm");
 const CONFIG_PATH = path.join(CLM_DIR, "config.json");
 
 interface ClmConfig {

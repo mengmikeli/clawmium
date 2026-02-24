@@ -7,7 +7,7 @@ import { loadSession, restoreManagerFromEnvelope } from "../session/persistence"
 // Paths
 // ===================================================================
 
-const CLM_DIR = path.join(process.env.HOME || "~", "clm");
+const CLM_DIR = process.env.CLM_DIR || path.join(process.env.HOME || "~", "clm");
 const CRAWL_DIR = path.join(CLM_DIR, "crawls");
 
 function ensureDir(dir: string): void {
