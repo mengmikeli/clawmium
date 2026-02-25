@@ -4,6 +4,7 @@ export interface PageContent {
   title: string;
   url: string;
   text: string;
+  markdown?: string | null;
   links: Array<{ text: string; href: string }>;
   forms: Array<{
     id: string;

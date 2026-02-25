@@ -139,6 +139,7 @@ function makeMockInterceptor(): any {
     attach: () => {},
     getResponses: () => [],
     findRichContent: () => null,
+    getMarkdownContent: () => null,
     onIntercept: null,
   };
 }

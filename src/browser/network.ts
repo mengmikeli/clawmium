@@ -13,6 +13,7 @@ export interface InterceptedResponse {
 export class NetworkInterceptor {
   private responses: InterceptedResponse[] = [];
   private allowedOrigin: string | null = null;
+  private markdownContent: string | null = null;
   onIntercept: ((resp: InterceptedResponse) => void) | null = null;
 
   attach(page: Page, baseUrl?: string): void {
@@ -28,6 +29,17 @@ export class NetworkInterceptor {
       const url = response.url();
 
       const contentType = response.headers()["content-type"] || "";
+
+      // Capture markdown responses (from servers that honor Accept: text/markdown)
+      if (contentType.includes("text/markdown")) {
+        try {
+          const body = await response.text();
+          if (body && body.length > 0) {
+            this.markdownContent = body.length > 8000 ? body.slice(0, 8000) : body;
+          }
+        } catch { /* body may be disposed */ }
+      }
+
       if (!contentType.includes("application/json")) return;
 
       // For /api/ routes, only capture from our target origin
@@ -95,6 +107,11 @@ export class NetworkInterceptor {
 
   clear(): void {
     this.responses = [];
+    this.markdownContent = null;
+  }
+
+  getMarkdownContent(): string | null {
+    return this.markdownContent;
   }
 
   /**

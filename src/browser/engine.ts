@@ -1,5 +1,10 @@
 import { chromium, Browser, BrowserContext, Page, CDPSession } from "playwright";
 
+/** Prefer markdown from servers that support it; graceful fallback for all others. */
+const EXTRA_HEADERS = {
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/markdown;q=0.8,*/*;q=0.7',
+};
+
 export class BrowserEngine {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
@@ -15,6 +20,7 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: EXTRA_HEADERS,
     });
     this.page = await this.context.newPage();
     this.headed = false;
@@ -52,6 +58,7 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: EXTRA_HEADERS,
     });
 
     // Restore cookies
@@ -98,6 +105,7 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: EXTRA_HEADERS,
     });
 
     // Restore cookies
@@ -187,6 +195,7 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: EXTRA_HEADERS,
     });
     this.page = await this.context.newPage();
   }

@@ -502,10 +502,14 @@ export class Repl {
 
     // Agent-first: if DOM content is sparse, check intercepted network
     // responses for rich text content (article bodies, etc.)
-    let pageText = this.buildPageText(content, ariaSnapshot?.yaml);
+    const markdown = this.interceptor.getMarkdownContent();
+    if (this.state.debugEnabled && markdown) {
+      render.debug("markdown", `${markdown.length} chars from text/markdown response`);
+    }
+    let pageText = this.buildPageText(content, ariaSnapshot?.yaml, markdown);
     const visibleTextLen = content.text.trim().length;
 
-    if (visibleTextLen < 500) {
+    if (visibleTextLen < 500 && !markdown) {
       const richContent = this.interceptor.findRichContent();
       if (richContent) {
         render.progress("extracting content...");
@@ -748,7 +752,7 @@ export class Repl {
     await this.syncBrowser();
     const content = await this.nav.extractContent();
     const ariaSnapshot = await this.nav.extractAriaSnapshot();
-    const pageText = this.buildPageText(content, ariaSnapshot?.yaml);
+    const pageText = this.buildPageText(content, ariaSnapshot?.yaml, this.interceptor.getMarkdownContent());
     render.progress("thinking...");
 
     // Build conversation context from previous summary + user question
@@ -890,11 +894,15 @@ export class Repl {
       return interpretation;
     }
 
-    // Build page text (with rich content fallback)
-    let pageText = this.buildPageText(content, ariaSnapshot?.yaml);
+    // Build page text (with markdown-first, then rich content fallback)
+    const markdown2 = this.interceptor.getMarkdownContent();
+    if (this.state.debugEnabled && markdown2) {
+      render.debug("markdown", `${markdown2.length} chars from text/markdown response`);
+    }
+    let pageText = this.buildPageText(content, ariaSnapshot?.yaml, markdown2);
     const visibleTextLen = content.text.trim().length;
 
-    if (visibleTextLen < 500) {
+    if (visibleTextLen < 500 && !markdown2) {
       const richContent = this.interceptor.findRichContent();
       if (richContent) {
         const richSections = [
@@ -1408,11 +1416,17 @@ export class Repl {
     }
   }
 
-  private buildPageText(content: PageContent, ariaYaml?: string | null): string {
+  private buildPageText(content: PageContent, ariaYaml?: string | null, markdown?: string | null): string {
     const sections = [
       `Title: ${content.title}`,
       `URL: ${content.url}`,
-      `\nVisible text:\n${content.text}`,
+    ];
+    if (markdown) {
+      sections.push(`\nContent (markdown):\n${markdown}`);
+    } else {
+      sections.push(`\nVisible text:\n${content.text}`);
+    }
+    sections.push(
       `\nLinks:`,
       ...content.links.map((l) => `  - "${l.text}" → ${l.href}`),
       `\nForms:`,
@@ -1420,7 +1434,7 @@ export class Repl {
         (f) =>
           `  - Form(id="${f.id}", action="${f.action}", inputs: ${f.inputs.map((i) => i.name || i.type).join(", ")})`
       ),
-    ];
+    );
     if (ariaYaml) {
       const truncated = ariaYaml.length > 6000
         ? ariaYaml.slice(0, 6000) + "\n... (truncated)"
