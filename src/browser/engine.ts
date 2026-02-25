@@ -1,9 +1,24 @@
 import { chromium, Browser, BrowserContext, Page, CDPSession } from "playwright";
 
 /** Prefer markdown from servers that support it; graceful fallback for all others. */
-const EXTRA_HEADERS = {
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/markdown;q=0.8,*/*;q=0.7',
-};
+const MARKDOWN_ACCEPT = 'text/markdown,text/html;q=0.9,application/xhtml+xml;q=0.9,application/xml;q=0.8,*/*;q=0.7';
+
+/**
+ * Install a route on the context that overrides the Accept header for
+ * document (navigation) requests. Chromium ignores extraHTTPHeaders for
+ * navigation requests, so we intercept and patch at the network level.
+ */
+async function installMarkdownRoute(context: BrowserContext): Promise<void> {
+  await context.route('**/*', (route, request) => {
+    if (request.resourceType() === 'document') {
+      route.fallback({
+        headers: { ...request.headers(), 'accept': MARKDOWN_ACCEPT },
+      });
+    } else {
+      route.fallback();
+    }
+  });
+}
 
 export class BrowserEngine {
   private browser: Browser | null = null;
@@ -20,8 +35,8 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
-      extraHTTPHeaders: EXTRA_HEADERS,
     });
+    await installMarkdownRoute(this.context);
     this.page = await this.context.newPage();
     this.headed = false;
     this.showing = false;
@@ -58,8 +73,8 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
-      extraHTTPHeaders: EXTRA_HEADERS,
     });
+    await installMarkdownRoute(this.context);
 
     // Restore cookies
     if (cookies.length > 0) {
@@ -105,8 +120,8 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
-      extraHTTPHeaders: EXTRA_HEADERS,
     });
+    await installMarkdownRoute(this.context);
 
     // Restore cookies
     if (cookies.length > 0) {
@@ -195,8 +210,8 @@ export class BrowserEngine {
     this.listenForDisconnect();
     this.context = await this.browser.newContext({
       viewport: { width: 1280, height: 900 },
-      extraHTTPHeaders: EXTRA_HEADERS,
     });
+    await installMarkdownRoute(this.context);
     this.page = await this.context.newPage();
   }
 

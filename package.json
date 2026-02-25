@@ -19,6 +19,7 @@
     "test:auto": "tsx src/__test__auto.ts",
     "test:repl": "tsx src/__test__repl.ts",
     "test:aria": "tsx src/__test__aria.ts",
+    "test:markdown": "tsx src/browser/__test__markdown.ts",
     "clm": "tsx src/index.ts"
   },
   "keywords": [],

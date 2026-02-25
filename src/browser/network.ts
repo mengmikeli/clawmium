@@ -30,11 +30,12 @@ export class NetworkInterceptor {
 
       const contentType = response.headers()["content-type"] || "";
 
-      // Capture markdown responses (from servers that honor Accept: text/markdown)
+      // Capture markdown responses (from servers that honor Accept: text/markdown).
+      // Keep the longest response — short fragments (sub-resources) shouldn't overwrite the main document.
       if (contentType.includes("text/markdown")) {
         try {
           const body = await response.text();
-          if (body && body.length > 0) {
+          if (body && body.length > 200 && body.length > (this.markdownContent?.length ?? 0)) {
             this.markdownContent = body.length > 8000 ? body.slice(0, 8000) : body;
           }
         } catch { /* body may be disposed */ }
