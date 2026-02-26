@@ -63,7 +63,7 @@ async function main() {
   // ---------------------------------------------------------------
   console.log("--- Test 1: HN -> Stratechery -> /back restores HN ---\n");
 
-  console.log("1. Cross-domain navigation with stash pop restores nodes, cursor, and metadata...");
+  console.log("1. Cross-domain navigation with global cursor back triggers tree swap...");
   {
     const m = new CrawlManager();
 
@@ -101,29 +101,37 @@ async function main() {
       goalContext: makeGoalContext("browsing stratechery.com"),
     });
 
-    // Step 5: Verify full history spans both crawls
+    // Step 5: Verify full history spans both crawls (global cursor)
     const fullHistory = m.getFullCursorHistory();
     assert(fullHistory.length === 3, `full history has 3 entries (got ${fullHistory.length})`);
-    assert(fullHistory[0].stashIndex === 0, "entry 0 is from stash");
-    assert(fullHistory[1].stashIndex === 0, "entry 1 is from stash");
-    assert(fullHistory[2].stashIndex === -1, "entry 2 is from active crawl");
+    assert(fullHistory[0].stashIndex === 0, "entry 0 is from stash (HN root)");
+    assert(fullHistory[1].stashIndex === 0, "entry 1 is from stash (HN article)");
+    assert(fullHistory[2].stashIndex === -1, "entry 2 is from active crawl (Stratechery)");
 
     // Step 6: getNodeAcrossStash finds HN article from Stratechery context
     const hnArticleNode = m.getNodeAcrossStash(hnArticle.id);
     assert(hnArticleNode !== null, "HN article found across stash");
     assert(hnArticleNode!.url === "https://news.ycombinator.com/item?id=99999", "HN article URL correct");
 
-    // Step 7: Simulate /back at root — cursorBack returns null, pop stash
+    // Step 7: Simulate /back — cursorBack returns HN article entry (cross-crawl)
     const backResult = m.cursorBack();
-    assert(backResult === null, "cursorBack returns null at Stratechery root");
-    assert(m.hasStash() === true, "stash has entries");
-    m.popStash();
+    assert(backResult !== null, "cursorBack returns HN article entry");
+    assert(backResult!.nodeId === hnArticle.id, "cursorBack points to HN article");
 
-    // Step 8: Verify HN restored
-    assert(m.activeCrawl !== null, "active crawl restored");
-    assert(m.activeCrawl!.id === hnCrawlId, "restored crawl ID is HN's");
+    // Node is not in active crawl — need to swap
+    const node = m.getNode(backResult!.nodeId);
+    assert(node === null, "HN article not found in active (Stratechery) crawl");
+
+    // findOwnerCrawl locates it in stash
+    const owner = m.findOwnerCrawl(backResult!.nodeId);
+    assert(owner !== null, "findOwnerCrawl finds the node");
+    assert(owner!.stashIndex === 0, "node is in stash at index 0");
+
+    // swapToStash makes HN active
+    m.swapToStash(owner!.stashIndex);
+    assert(m.activeCrawl!.id === hnCrawlId, "HN crawl is now active");
     assert(m.nodes.size === 2, "2 nodes restored (HN root + article)");
-    assert(m.currentNodeId === hnArticle.id, "cursor restored at article (where we left off)");
+    assert(m.stash.length === 1, "Stratechery now in stash");
 
     // Verify metadata on restored node
     const restoredArticle = m.getNode(hnArticle.id)!;
@@ -133,24 +141,28 @@ async function main() {
     assert(restoredArticle.metadata?.goalContext?.baseGoal === "browsing HN", "goalContext baseGoal restored");
     assert(restoredArticle.metadata?.goalContext?.activeIntent === "reading AI article", "goalContext intent restored");
 
-    // Step 9: cursorBack within HN crawl works
+    // Step 8: cursorBack within HN crawl works (goes to HN root)
     const backToRoot = m.cursorBack();
     assert(backToRoot !== null, "cursorBack within HN works");
     assert(backToRoot!.nodeId === hnRootId, "back goes to HN front page");
 
-    // Step 10: cursorForward works
+    // Step 9: cursorForward goes back to article, then to Stratechery
     const fwdToArticle = m.cursorForward();
     assert(fwdToArticle !== null, "cursorForward works");
     assert(fwdToArticle!.nodeId === hnArticle.id, "forward goes back to article");
+
+    const fwdToStrat = m.cursorForward();
+    assert(fwdToStrat !== null, "cursorForward to Stratechery works");
+    assert(fwdToStrat!.nodeId === stratRootId, "forward goes to Stratechery root");
   }
   console.log();
 
   // ---------------------------------------------------------------
-  // TEST 2: Multiple cross-domain jumps, LIFO pop order
+  // TEST 2: Multiple cross-domain jumps, global cursor continuity
   // ---------------------------------------------------------------
-  console.log("--- Test 2: Multiple cross-domain jumps, LIFO pop order ---\n");
+  console.log("--- Test 2: Multiple cross-domain jumps, global cursor ---\n");
 
-  console.log("2. Three crawls stacked, LIFO pop restores in correct order...");
+  console.log("2. Three crawls stacked, global cursor has all entries, back/forward work across boundaries...");
   {
     const m = new CrawlManager();
 
@@ -176,38 +188,43 @@ async function main() {
     assert(m.stash.length === 2, "stash depth is 2");
     assert(m.activeCrawl!.name.length > 0, "active crawl (Wikipedia) has name");
 
-    // Full history has all entries
+    // Global cursor has all entries
+    assert(m.cursorHistory.length === 5, `global cursor has 5 entries (got ${m.cursorHistory.length})`);
+
+    // Full history annotated correctly
     const fullHistory = m.getFullCursorHistory();
     assert(fullHistory.length === 5, `full history has 5 entries (got ${fullHistory.length})`);
 
-    // Pop #1 — should get BBC (LIFO)
-    m.popStash();
-    assert(m.findNodeByUrl("https://bbc.com") !== null, "BBC root found after first pop");
-    assert(m.findNodeByUrl("https://bbc.com/news/tech-123") !== null, "BBC article found after first pop");
-    assert(m.currentNodeId === bbcArticle.id, "cursor at BBC article (where we left off)");
+    // cursorBack from Wikipedia → BBC article (cross-crawl via global cursor)
+    const back1 = m.cursorBack();
+    assert(back1 !== null, "back from Wikipedia returns entry");
+    assert(back1!.nodeId === bbcArticle.id, "back goes to BBC article");
 
-    // Pop #2 — should get HN
-    m.popStash();
-    assert(m.findNodeByUrl("https://news.ycombinator.com") !== null, "HN root found after second pop");
-    assert(m.currentNodeId === hnArticle.id, "cursor at HN article");
+    // cursorBack → BBC root
+    const back2 = m.cursorBack();
+    assert(back2 !== null, "second back returns entry");
 
-    // Pop #3 — empty stash
-    const emptyPop = m.popStash();
-    assert(emptyPop === null, "pop returns null on empty stash");
+    // cursorBack → HN article
+    const back3 = m.cursorBack();
+    assert(back3 !== null, "third back returns entry");
+    assert(back3!.nodeId === hnArticle.id, "third back goes to HN article");
 
-    // /back at HN root with empty stash
-    m.cursorBack(); // back to HN root
+    // cursorBack → HN root
+    const back4 = m.cursorBack();
+    assert(back4 !== null, "fourth back returns entry");
+
+    // cursorBack at start → null
     const noMoreBack = m.cursorBack();
-    assert(noMoreBack === null, "cursorBack null at HN root with empty stash");
+    assert(noMoreBack === null, "cursorBack null at start of history");
   }
   console.log();
 
   // ---------------------------------------------------------------
-  // TEST 3: Session resume with stash
+  // TEST 3: Session resume with stash (v5 global cursor)
   // ---------------------------------------------------------------
   console.log("--- Test 3: Session resume with stash ---\n");
 
-  console.log("3. Save session with stash, restore on fresh manager, stash intact...");
+  console.log("3. Save session with stash, restore on fresh manager, global cursor intact...");
   {
     const m1 = new CrawlManager();
 
@@ -239,7 +256,8 @@ async function main() {
       goalContext: makeGoalContext("browsing stratechery"),
     });
 
-    // Save full history for comparison
+    // Global cursor has 3 entries (2 HN + 1 Stratechery)
+    assert(m1.cursorHistory.length === 3, "global cursor has 3 entries before save");
     const fullHistoryBefore = m1.getFullCursorHistory();
 
     // Save session
@@ -256,6 +274,7 @@ async function main() {
 
     // Restore on fresh manager
     const envelope = loadSession(m1.activeCrawl!.id)!;
+    assert(envelope.version === 5, "saved as v5 envelope");
     const m2 = new CrawlManager();
     restoreManagerFromEnvelope(envelope, m2);
 
@@ -268,6 +287,10 @@ async function main() {
     assert(m2.stash.length === 1, "stash has 1 entry (HN)");
     assert(m2.stash[0].nodes.size === 2, "stashed HN has 2 nodes");
 
+    // Global cursor preserved across save/restore
+    assert(m2.cursorHistory.length === 3, "global cursor has 3 entries after restore");
+    assert(m2.cursorIndex === 2, "cursorIndex at end after restore");
+
     // Pop stash — HN restored with correct metadata
     m2.popStash();
     assert(m2.activeCrawl !== null, "HN crawl restored from stash");
@@ -277,8 +300,6 @@ async function main() {
     assert(restoredArticle!.metadata?.summary === "Article about AI agents", "article metadata survived save/load/pop");
 
     // Full history on restored manager matches pre-save
-    // (After pop, we only have the HN cursor entries now — Stratechery entries gone since we popped)
-    // Instead, verify the pre-pop full history
     const m3 = new CrawlManager();
     restoreManagerFromEnvelope(envelope, m3);
     const fullHistoryAfter = m3.getFullCursorHistory();
@@ -327,7 +348,7 @@ async function main() {
   // ---------------------------------------------------------------
   console.log("--- Test 5: /crawl end preserves stash ---\n");
 
-  console.log("5. clearActive() ends current crawl but stash survives for /back...");
+  console.log("5. clearActive() ends current crawl but stash and cursor survive...");
   {
     const m = new CrawlManager();
 
@@ -352,7 +373,8 @@ async function main() {
     m.clearActive();
     assert(m.activeCrawl === null, "active crawl null after clearActive");
     assert(m.nodes.size === 0, "active nodes cleared");
-    assert(m.cursorHistory.length === 0, "active cursor cleared");
+    // Cursor is session-level — preserved after clearActive
+    assert(m.cursorHistory.length === 2, "global cursor preserved after clearActive");
 
     // Stash survives!
     assert(m.hasStash() === true, "stash survives clearActive");
@@ -371,7 +393,7 @@ async function main() {
   // ---------------------------------------------------------------
   console.log("--- Test 6: /crawl load stashes current ---\n");
 
-  console.log("6. Loading a saved crawl stashes the current one, both accessible...");
+  console.log("6. Loading a saved crawl stashes current, global cursor preserved...");
   {
     const m = new CrawlManager();
 
@@ -403,25 +425,22 @@ async function main() {
     const bPage = m.addNavigation("https://site-b.com/page1", "B Page 1", "choice");
     m.appendCursor(bPage.id, "choice");
 
-    // Simulate /crawl load: the REPL stashes B first, saves the stash,
-    // then loads A from disk. loadCrawl uses restoreManagerFromEnvelope
-    // which replaces active state but we need to preserve the stash.
-    // The real REPL would: (1) pushStash (B), (2) save stash aside,
-    // (3) loadCrawl (replaces manager), (4) re-attach saved stash.
-    // Here we simulate the same pattern:
-    const savedStash = [...m.stash]; // stash currently has [A]
-    m.pushStash(); // stash [A, B], active null
-    const fullStash = [...m.stash]; // save [A, B]
+    // Global cursor now has 4 entries (2 A + 2 B)
+    assert(m.cursorHistory.length === 4, "global cursor has 4 entries before load");
+
+    // Simulate /crawl load: stash B, save full state, loadCrawl, restore cursor+stash
+    m.pushStash(); // stash B — stash now [A, B]
+    const savedCursor = [...m.cursorHistory.map(e => ({ ...e }))];
+    const savedCursorIndex = m.cursorIndex;
+    const savedStash = [...m.stash]; // [A, B]
 
     // loadCrawl replaces everything on the manager
     loadCrawl(crawlAId, m);
 
-    // Re-attach the stash entries that loadCrawl wiped
-    // (In practice the REPL would need to do this — loadCrawl via
-    // restoreManagerFromEnvelope replaces stash too. But the loaded session
-    // for A was saved when A was active with no stash. So we need to
-    // manually preserve B's stash entry.)
-    m.stash = fullStash;
+    // Restore global cursor and stash
+    m.cursorHistory = savedCursor;
+    m.cursorIndex = savedCursorIndex;
+    m.stash = [...savedStash, ...m.stash];
 
     // Active crawl is A (loaded from disk)
     assert(m.activeCrawl !== null, "active crawl loaded");
@@ -431,6 +450,9 @@ async function main() {
 
     // Stash has [original-A, B]
     assert(m.stash.length === 2, `stash has 2 entries (got ${m.stash.length})`);
+
+    // Global cursor preserved
+    assert(m.cursorHistory.length === 4, "global cursor preserved at 4 entries");
 
     // Pop stash — should get B (LIFO: B was pushed last)
     m.popStash();
@@ -468,7 +490,7 @@ async function main() {
     m.appendCursor(bRoot, "goto");
     m.setNodeMetadata(bRoot, { summary: "B root" });
 
-    // Full history should have 3 entries
+    // Full history should have 3 entries (global cursor)
     const full = m.getFullCursorHistory();
     assert(full.length === 3, `full history has 3 entries (got ${full.length})`);
     assert(full[0].stashIndex === 0, "entry 0 from stash (A root)");
@@ -479,37 +501,19 @@ async function main() {
     assert(full[0].crawlName !== undefined && full[0].crawlName.length > 0, "stash entry has crawlName");
     assert(full[0].crawlId !== undefined && full[0].crawlId.length > 0, "stash entry has crawlId");
 
-    // Simulate /history jump to entry in stash:
-    // To jump to stash entry 0 (A root), the REPL would:
-    // 1. Push current active (B) onto stash
-    // 2. Find which stash entry contains the target node
-    // 3. Splice that crawl out of stash, restore as active
-    // 4. Jump cursor to the target position
-
-    // Step 1: Stash B
-    m.pushStash();
-    assert(m.stash.length === 2, "stash has 2 after pushing B");
-
-    // Step 2: Pop the stash entry containing A (it's at index 0, the first/oldest)
-    // In real REPL, this would be a splice. Here we simulate: pop B (last), then pop A, then push B back
-    const poppedB = m.stash.pop()!; // Remove B (last)
-    const poppedA = m.stash.pop()!; // Remove A (first = oldest)
-
-    // Step 3: Restore A as active
-    m.activeCrawl = poppedA.activeCrawl;
-    m.nodes = poppedA.nodes;
-    m.nodeIndex = poppedA.nodeIndex;
-    m.currentNodeId = poppedA.currentNodeId;
-    m.cursorHistory = poppedA.cursorHistory;
-    m.cursorIndex = poppedA.cursorIndex;
-
-    // Push B back onto stash
-    m.stash.push(poppedB);
-
-    // Step 4: Jump cursor to entry 0 (A root)
+    // Jump to entry 0 (A root) using cursorJump + swapToStash
     m.cursorJump(0);
+    assert(m.cursorIndex === 0, "cursor jumped to index 0");
 
-    // Verify state
+    // Node is in stash — find owner and swap
+    const entry = m.cursorHistory[0];
+    const owner = m.findOwnerCrawl(entry.nodeId);
+    assert(owner !== null, "findOwnerCrawl found the node");
+    assert(owner!.stashIndex === 0, "node is in stash[0]");
+
+    m.swapToStash(owner!.stashIndex);
+
+    // Verify state after swap
     assert(m.activeCrawl !== null, "active crawl is A");
     assert(m.findNodeByUrl("https://site-a.com") !== null, "A root present");
     assert(m.cursorIndex === 0, "cursor at position 0 (A root)");

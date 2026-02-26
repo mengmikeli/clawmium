@@ -369,7 +369,7 @@ async function main() {
 
     const envelope = loadSession(crawl.id);
     assert(envelope !== null, "loadSession returns envelope");
-    assert(envelope!.version === 4, "version is 4");
+    assert(envelope!.version === 5, "version is 5");
     assert(envelope!.crawl.id === crawl.id, "crawl ID matches");
     assert(envelope!.repl.currentUrl === "https://test.com", "currentUrl matches");
   }
@@ -552,7 +552,7 @@ async function main() {
     // We already have sessions saved above
     const result = findLastSession(7);
     assert(result !== null, "findLastSession returns non-null");
-    assert(result!.envelope.version === 2 || result!.envelope.version === 3 || result!.envelope.version === 4, "envelope is valid (v2, v3, or v4)");
+    assert(result!.envelope.version === 2 || result!.envelope.version === 3 || result!.envelope.version === 4 || result!.envelope.version === 5, "envelope is valid (v2, v3, v4, or v5)");
   }
   console.log();
 
@@ -763,7 +763,7 @@ async function main() {
   // ---------------------------------------------------------------
   console.log("--- Stash persistence ---\n");
 
-  console.log("31. saveSession includes stash in version 3 envelope...");
+  console.log("31. saveSession includes stash in version 5 envelope...");
   {
     const m = new CrawlManager();
     // Create first crawl and stash it
@@ -791,15 +791,19 @@ async function main() {
 
     assert(filepath !== null, "saveSession returns filepath with stash");
     const raw = JSON.parse(fs.readFileSync(filepath!, "utf-8"));
-    assert(raw.version === 4, "envelope is version 4");
+    assert(raw.version === 5, "envelope is version 5");
     assert(Array.isArray(raw.stash), "stash is array");
     assert(raw.stash.length === 1, "stash has 1 entry");
     assert(raw.stash[0].nodes.length === 1, "stashed crawl has 1 node");
     assert(raw.stash[0].name.length > 0, "stashed crawl has name");
+    // v5: no cursorHistory/cursorIndex on stash entries
+    assert(raw.stash[0].cursorHistory === undefined, "stash entry has no cursorHistory");
+    // Global cursor in crawl block
+    assert(raw.crawl.cursorHistory.length === 2, "global cursor has 2 entries in crawl block");
   }
   console.log();
 
-  console.log("32. stash round-trip — save/load/restore preserves stash...");
+  console.log("32. stash round-trip — save/load/restore preserves stash (no per-stash cursor)...");
   {
     const m1 = new CrawlManager();
     // First crawl
@@ -836,8 +840,9 @@ async function main() {
     assert(m2.stash.length === 1, "stash restored with 1 entry");
     assert(m2.stash[0].activeCrawl.name.length > 0, "stashed crawl name preserved");
     assert(m2.stash[0].nodes.size === 2, `stashed crawl has 2 nodes (got ${m2.stash[0].nodes.size})`);
-    assert(m2.stash[0].cursorHistory.length === 2, "stashed cursor history restored");
-    assert(m2.stash[0].cursorIndex === 1, "stashed cursorIndex restored");
+    // No per-stash cursor in v5 — global cursor in crawl block
+    assert(m2.cursorHistory.length === 3, "global cursor has 3 entries (2 A + 1 B)");
+    assert(m2.cursorIndex === 2, "global cursorIndex at end");
     assert(m2.activeCrawl !== null, "active crawl restored");
     assert(m2.nodes.size === 1, "active crawl has 1 node");
 
@@ -941,7 +946,7 @@ async function main() {
   }
   console.log();
 
-  console.log("35. getFullCursorHistory after restore matches pre-save...");
+  console.log("35. getFullCursorHistory after restore matches pre-save (global cursor)...");
   {
     const m1 = new CrawlManager();
     m1.createCrawl("https://a.com", "A", "goto");
@@ -969,6 +974,7 @@ async function main() {
 
     const fullAfter = m2.getFullCursorHistory();
     assert(fullAfter.length === 2, `2 entries in full history after restore (got ${fullAfter.length})`);
+    // Both entries are in the global cursor; stashIndex determined by node ownership
     assert(fullAfter[0].stashIndex === 0, "first entry is from stash");
     assert(fullAfter[1].stashIndex === -1, "second entry is from active");
   }

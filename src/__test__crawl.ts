@@ -422,7 +422,7 @@ async function main() {
   // ---------------------------------------------------------------
   console.log("--- Stash operations ---\n");
 
-  console.log("19. pushStash/popStash — round-trip preserves nodes and cursor...");
+  console.log("19. pushStash/popStash — round-trip preserves nodes (cursor is global)...");
   {
     const m = new CrawlManager();
     m.createCrawl("https://hn.com", "HN", "goto");
@@ -438,7 +438,8 @@ async function main() {
     assert(pushed === true, "pushStash returns true");
     assert(m.activeCrawl === null, "active crawl is null after push");
     assert(m.nodes.size === 0, "nodes empty after push");
-    assert(m.cursorHistory.length === 0, "cursor empty after push");
+    // Cursor is global — NOT cleared by pushStash
+    assert(m.cursorHistory.length === 2, "global cursor preserved after push");
     assert(m.stash.length === 1, "stash has 1 entry");
 
     // Pop back
@@ -447,8 +448,9 @@ async function main() {
     assert(restored!.id === crawlId, "restored crawl ID matches");
     assert(restored!.name === crawlName, "restored crawl name matches");
     assert(m.nodes.size === 2, "nodes restored (2)");
-    assert(m.cursorHistory.length === 2, "cursor restored (2 entries)");
-    assert(m.cursorIndex === 1, "cursorIndex restored");
+    // Cursor still global — untouched by pop
+    assert(m.cursorHistory.length === 2, "global cursor still 2 entries after pop");
+    assert(m.cursorIndex === 1, "cursorIndex unchanged");
     assert(m.currentNodeId === article.id, "currentNodeId restored");
     assert(m.stash.length === 0, "stash empty after pop");
   }
@@ -470,28 +472,33 @@ async function main() {
   }
   console.log();
 
-  console.log("21. clear() clears stash, clearActive() preserves stash...");
+  console.log("21. clear() clears stash+cursor, clearActive() preserves both...");
   {
     const m = new CrawlManager();
     m.createCrawl("https://a.com", "A", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
     m.pushStash();
     m.createCrawl("https://b.com", "B", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
     m.pushStash();
     m.createCrawl("https://c.com", "C", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
     assert(m.stash.length === 2, "2 stashed crawls");
 
-    // clearActive preserves stash
+    // clearActive preserves stash AND cursor
     m.clearActive();
     assert(m.activeCrawl === null, "active crawl cleared");
     assert(m.stash.length === 2, "stash preserved after clearActive");
+    assert(m.cursorHistory.length === 3, "cursor preserved after clearActive");
 
-    // clear() clears everything
+    // clear() clears everything including cursor
     m.clear();
     assert(m.stash.length === 0, "stash cleared after clear()");
+    assert(m.cursorHistory.length === 0, "cursor cleared after clear()");
   }
   console.log();
 
-  console.log("22. getFullCursorHistory — combines stash + active...");
+  console.log("22. getFullCursorHistory — annotates global cursor with crawl ownership...");
   {
     const m = new CrawlManager();
     // First crawl: 2 pages
@@ -507,8 +514,10 @@ async function main() {
 
     const full = m.getFullCursorHistory();
     assert(full.length === 3, `full history has 3 entries (got ${full.length})`);
+    // First 2 entries reference nodes in the stash
     assert(full[0].stashIndex === 0, "first entry from stash (index 0)");
     assert(full[1].stashIndex === 0, "second entry from stash (index 0)");
+    // Third entry references node in active crawl
     assert(full[2].stashIndex === -1, "third entry from active crawl");
     assert(full[0].crawlName !== undefined, "stash entries have crawlName");
   }

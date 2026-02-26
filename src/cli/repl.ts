@@ -1232,68 +1232,41 @@ export class Repl {
       render.error(`history entry ${n} out of range (1–${fullCursor.length})`);
       return;
     }
-    const targetEntry = fullCursor[n - 1] as FullCursorEntry;
 
-    if (targetEntry.stashIndex === -1) {
-      // Target is in the active crawl — simple jump within active cursor
-      const stashEntryCount = fullCursor.length - this.crawlManager.cursorHistory.length;
-      const localIndex = (n - 1) - stashEntryCount;
-      const ok = this.crawlManager.cursorJump(localIndex);
-      if (!ok) {
-        render.error(`failed to jump to history entry ${n}`);
-        return;
-      }
-      const entry = this.crawlManager.cursorHistory[localIndex];
-      const node = this.crawlManager.getNode(entry.nodeId);
-      if (node) {
-        this.crawlManager.navigateToNode(node.id);
-        this.restoreFromNode(node);
-      } else {
-        render.warn("node not found in crawl tree");
-      }
+    // Global cursor — just jump directly
+    const targetIndex = n - 1;
+    const ok = this.crawlManager.cursorJump(targetIndex);
+    if (!ok) {
+      render.error(`failed to jump to history entry ${n}`);
+      return;
+    }
+
+    const entry = this.crawlManager.cursorHistory[targetIndex];
+    const node = this.crawlManager.getNode(entry.nodeId);
+    if (node) {
+      // Node is in active crawl
+      this.crawlManager.navigateToNode(node.id);
+      this.restoreFromNode(node);
     } else {
-      // Target is in a stashed crawl — need to swap crawls
-      const stashIdx = targetEntry.stashIndex;
-      if (stashIdx < 0 || stashIdx >= this.crawlManager.stash.length) {
-        render.error("stash entry not found");
-        return;
-      }
-      // Push current active onto stash
-      if (this.crawlManager.activeCrawl) {
-        this.crawlManager.pushStash();
-      }
-      // Extract the target crawl from stash (splice it out, don't pop from end)
-      const [targetStash] = this.crawlManager.stash.splice(stashIdx, 1);
-      // Restore it as active
-      this.crawlManager.activeCrawl = targetStash.activeCrawl;
-      this.crawlManager.nodes = targetStash.nodes;
-      this.crawlManager.nodeIndex = targetStash.nodeIndex;
-      this.crawlManager.currentNodeId = targetStash.currentNodeId;
-      this.crawlManager.cursorHistory = targetStash.cursorHistory;
-      this.crawlManager.cursorIndex = targetStash.cursorIndex;
-
-      // Now jump within this restored crawl's cursor to the right entry
-      // Find the local cursor index by matching nodeId + timestamp
-      const localIdx = this.crawlManager.cursorHistory.findIndex(
-        e => e.nodeId === targetEntry.nodeId && e.timestamp === targetEntry.timestamp
-      );
-      if (localIdx >= 0) {
-        this.crawlManager.cursorJump(localIdx);
-      }
-
-      const node = this.crawlManager.getNodeAcrossStash(targetEntry.nodeId);
-      if (node) {
-        this.crawlManager.navigateToNode(node.id);
-        // Restore site/base URL from the node
-        try {
-          const hostname = new URL(node.url).hostname;
-          this.state.site = hostname.replace(/^www\./, "").split(".")[0];
-          this.engine.setBaseUrl(new URL(node.url).origin);
-        } catch { /* invalid URL */ }
-        this.restoreFromNode(node);
-        render.status(`jumped to stashed crawl: "${targetStash.activeCrawl.name}"`);
+      // Node might be in a stashed crawl — swap if needed
+      const owner = this.crawlManager.findOwnerCrawl(entry.nodeId);
+      if (owner && owner.stashIndex >= 0) {
+        this.crawlManager.swapToStash(owner.stashIndex);
+        const swappedNode = this.crawlManager.getNode(entry.nodeId);
+        if (swappedNode) {
+          this.crawlManager.navigateToNode(swappedNode.id);
+          try {
+            const hostname = new URL(swappedNode.url).hostname;
+            this.state.site = hostname.replace(/^www\./, "").split(".")[0];
+            this.engine.setBaseUrl(new URL(swappedNode.url).origin);
+          } catch { /* invalid URL */ }
+          this.restoreFromNode(swappedNode);
+          render.status(`jumped to crawl: "${this.crawlManager.activeCrawl?.name}"`);
+        } else {
+          render.warn("node not found after swap");
+        }
       } else {
-        render.warn("node not found in stashed crawl");
+        render.warn("node not found in any crawl");
       }
     }
     render.hint(["/refresh to update content"]);

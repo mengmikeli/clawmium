@@ -41,11 +41,11 @@ export async function handleStack(ctx: ReplContext): Promise<void> {
   const backEntries: render.StackEntry[] = [];
   const fwdEntries: render.StackEntry[] = [];
   for (let i = 0; i < cidx; i++) {
-    const node = ctx.crawlManager.getNode(cursor[i].nodeId);
+    const node = ctx.crawlManager.getNodeAcrossStash(cursor[i].nodeId);
     if (node) backEntries.push({ url: node.url, title: node.title });
   }
   for (let i = cidx + 1; i < cursor.length; i++) {
-    const node = ctx.crawlManager.getNode(cursor[i].nodeId);
+    const node = ctx.crawlManager.getNodeAcrossStash(cursor[i].nodeId);
     if (node) fwdEntries.push({ url: node.url, title: node.title });
   }
 
@@ -83,9 +83,8 @@ export async function handleHistory(ctx: ReplContext, arg: string): Promise<void
     render.status("no visit history yet — navigate to start recording");
     return;
   }
-  const stashEntryCount = fullCursor.length - ctx.crawlManager.cursorHistory.length;
-  const activeCursorIdx = ctx.crawlManager.cursorIndex;
-  const fullCurrentIdx = activeCursorIdx >= 0 ? stashEntryCount + activeCursorIdx : -1;
+  // Global cursor — cursorIndex IS the full index directly
+  const fullCurrentIdx = ctx.crawlManager.cursorIndex;
 
   const histEntries: render.HistoryEntry[] = fullCursor.map((entry, i) => {
     const node = ctx.crawlManager.getNodeAcrossStash(entry.nodeId);
@@ -174,37 +173,54 @@ export async function handleCrawl(ctx: ReplContext, arg: string, parts: string[]
         render.status("stashing active crawl...");
         ctx.stashCrawl();
       }
-      const preLoadStash = [...ctx.crawlManager.stash]; // snapshot before overwrite
+
+      // Save global cursor before loadCrawl (which calls restoreManagerFromEnvelope
+      // and may overwrite cursor from the saved session)
+      const savedCursor = ctx.crawlManager.cursorHistory;
+      const savedCursorIndex = ctx.crawlManager.cursorIndex;
+      const savedStash = [...ctx.crawlManager.stash];
 
       const loaded = loadCrawl(picked.id, ctx.crawlManager);
       if (!loaded) {
+        // Restore cursor on failure
+        ctx.crawlManager.cursorHistory = savedCursor;
+        ctx.crawlManager.cursorIndex = savedCursorIndex;
+        ctx.crawlManager.stash = savedStash;
         render.error("failed to load crawl");
         return;
       }
 
-      // Merge: pre-load stash entries go in front of loaded session's stash
-      ctx.crawlManager.stash = [...preLoadStash, ...ctx.crawlManager.stash];
+      // Restore global cursor and stash — don't use loaded session's cursor
+      ctx.crawlManager.cursorHistory = savedCursor;
+      ctx.crawlManager.cursorIndex = savedCursorIndex;
+      // Merge: pre-load stash entries + any stash from loaded session
+      ctx.crawlManager.stash = [...savedStash, ...ctx.crawlManager.stash];
       // Enforce cap (drop oldest)
       while (ctx.crawlManager.stash.length > 10) ctx.crawlManager.stash.shift();
 
-      const currentNode = ctx.crawlManager.currentNodeId
-        ? ctx.crawlManager.getNode(ctx.crawlManager.currentNodeId)
-        : null;
-      if (currentNode) {
-        ctx.state.currentUrl = currentNode.url;
-        ctx.state.lastPageTitle = currentNode.title;
-        if (currentNode.metadata?.interpretation) {
-          ctx.setInterpretation(currentNode.metadata.interpretation);
+      // Position at root and append a single cursor entry
+      const rootId = ctx.crawlManager.activeCrawl?.rootId;
+      if (rootId) {
+        ctx.crawlManager.currentNodeId = rootId;
+        ctx.crawlManager.appendCursor(rootId, "goto");
+      }
+
+      const rootNode = rootId ? ctx.crawlManager.getNode(rootId) : null;
+      if (rootNode) {
+        ctx.state.currentUrl = rootNode.url;
+        ctx.state.lastPageTitle = rootNode.title;
+        if (rootNode.metadata?.interpretation) {
+          ctx.setInterpretation(rootNode.metadata.interpretation);
         }
-        if (currentNode.metadata?.goalContext) {
+        if (rootNode.metadata?.goalContext) {
           ctx.state.goalContext = {
-            ...currentNode.metadata.goalContext,
-            breadcrumb: [...(currentNode.metadata.goalContext.breadcrumb || [])],
+            ...rootNode.metadata.goalContext,
+            breadcrumb: [...(rootNode.metadata.goalContext.breadcrumb || [])],
           };
         }
       }
 
-      render.success(`loaded crawl: "${ctx.crawlManager.activeCrawl?.name || picked.name}"`);
+      render.success(`loaded crawl: "${ctx.crawlManager.activeCrawl?.name || picked.name}" (at root)`);
       ctx.logCommand(`/crawl load ${pickNum}`);
       return;
     }

@@ -418,10 +418,11 @@ async function main() {
   }
   console.log();
 
-  console.log("16. /back pops stash when at start of crawl...");
+  console.log("16. /back swaps to stash when cursor entry is in stashed crawl...");
   {
     const { repl, state, crawlManager } = makeTestRepl();
-    // Stash the current crawl
+    // Global cursor has entry 0 = root of current (example.com) crawl
+    // Stash the current crawl (tree moves to stash, cursor stays)
     crawlManager.pushStash();
     // Start a new crawl
     crawlManager.createCrawl("https://other.com", "Other Home", "goto");
@@ -437,9 +438,12 @@ async function main() {
       goalContext: { baseGoal: "browsing example.com", activeIntent: "", breadcrumb: [] },
     };
 
+    // /back — cursorBack returns the example.com entry, which is in the stash.
+    // handleBack uses findOwnerCrawl + swapToStash to make it active.
     await repl.handleInput("/back");
     assert(state.currentUrl === "https://example.com", "restored stashed crawl URL");
-    assert(!crawlManager.hasStash(), "stash is now empty");
+    // After swap, stash has the "other.com" crawl
+    assert(crawlManager.stash.length === 1, "other.com now in stash");
   }
   console.log();
 

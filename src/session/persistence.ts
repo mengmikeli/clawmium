@@ -34,12 +34,11 @@ export interface SerializedStashedCrawl {
   rootId: string;
   currentNodeId: string;
   nodes: SerializedCrawlNode[];
-  cursorHistory: CursorEntry[];
-  cursorIndex: number;
+  meta?: CrawlMeta;
 }
 
 export interface SessionEnvelope {
-  version: 2 | 3 | 4;
+  version: 2 | 3 | 4 | 5;
   savedAt: number;
   crawl: {
     id: string;
@@ -175,7 +174,7 @@ export function saveSession(opts: SaveSessionOptions): string | null {
   ensureDir(dir);
 
   const envelope: SessionEnvelope = {
-    version: 4,
+    version: 5,
     savedAt: Date.now(),
     crawl: {
       id: manager.activeCrawl.id,
@@ -197,8 +196,7 @@ export function saveSession(opts: SaveSessionOptions): string | null {
       rootId: s.activeCrawl.rootId,
       currentNodeId: s.currentNodeId || s.activeCrawl.rootId,
       nodes: serializeNodes(s.nodes),
-      cursorHistory: s.cursorHistory.map(e => ({ ...e })),
-      cursorIndex: s.cursorIndex,
+      meta: s.activeCrawl.meta,
     })),
     repl: {
       currentUrl: opts.currentUrl,
@@ -230,7 +228,7 @@ export function loadSession(crawlId: string): SessionEnvelope | null {
   try {
     const content = fs.readFileSync(filepath, "utf-8");
     const envelope = JSON.parse(content) as SessionEnvelope;
-    if (envelope.version !== 2 && envelope.version !== 3 && envelope.version !== 4) return null;
+    if (envelope.version !== 2 && envelope.version !== 3 && envelope.version !== 4 && envelope.version !== 5) return null;
     // Backfill stash for v2 envelopes
     if (!envelope.stash) envelope.stash = [];
     // Backfill meta for v2/v3 envelopes
@@ -257,11 +255,9 @@ export function restoreManagerFromEnvelope(envelope: SessionEnvelope, manager: C
   manager.activeCrawl = crawl;
   manager.nodes = deserializeNodes(envelope.crawl.nodes);
   manager.currentNodeId = envelope.crawl.currentNodeId;
-  manager.cursorHistory = envelope.crawl.cursorHistory.map(e => ({ ...e }));
-  manager.cursorIndex = envelope.crawl.cursorIndex;
   manager.rebuildIndex();
 
-  // Restore stash
+  // Restore stash (tree fields only — no cursor)
   manager.stash = (envelope.stash || []).map(s => {
     const stashedCrawl: Crawl = {
       id: s.id,
@@ -269,9 +265,10 @@ export function restoreManagerFromEnvelope(envelope: SessionEnvelope, manager: C
       created: s.created,
       lastAccessed: s.lastAccessed,
       rootId: s.rootId,
+      meta: (s as any).meta,
     };
     const nodes = deserializeNodes(s.nodes);
-    const nodeIndex = new Map<string, CrawlNode>();
+    const nodeIndex = new Map<CrawlNode["url"], CrawlNode>();
     for (const node of nodes.values()) {
       nodeIndex.set(node.url, node);
     }
@@ -280,10 +277,32 @@ export function restoreManagerFromEnvelope(envelope: SessionEnvelope, manager: C
       nodes,
       nodeIndex,
       currentNodeId: s.currentNodeId,
-      cursorHistory: s.cursorHistory.map(e => ({ ...e })),
-      cursorIndex: s.cursorIndex,
     } as StashedCrawl;
   });
+
+  // Cursor restoration: depends on envelope version
+  if (envelope.version >= 5) {
+    // v5+: global cursor saved in crawl block
+    manager.cursorHistory = envelope.crawl.cursorHistory.map(e => ({ ...e }));
+    manager.cursorIndex = envelope.crawl.cursorIndex;
+  } else {
+    // v3/v4 backward compat: per-stash cursors → reconstruct global cursor
+    // by concatenating stash[0].cursor + stash[1].cursor + ... + crawl.cursor
+    const reconstructed: CursorEntry[] = [];
+    for (const s of (envelope.stash || [])) {
+      const stashCursor = (s as any).cursorHistory;
+      if (Array.isArray(stashCursor)) {
+        for (const e of stashCursor) {
+          reconstructed.push({ ...e });
+        }
+      }
+    }
+    for (const e of envelope.crawl.cursorHistory) {
+      reconstructed.push({ ...e });
+    }
+    manager.cursorHistory = reconstructed;
+    manager.cursorIndex = reconstructed.length - 1;
+  }
 }
 
 /**

@@ -79,36 +79,39 @@ export async function handleGoto(ctx: ReplContext, arg: string): Promise<void> {
 export async function handleBack(ctx: ReplContext): Promise<void> {
   const entry = ctx.crawlManager.cursorBack();
   if (entry) {
+    // Check if the node is in the active crawl or a stashed one
     const node = ctx.crawlManager.getNode(entry.nodeId);
     if (node) {
+      // Node is in active crawl — simple case
       ctx.crawlManager.navigateToNode(node.id);
       ctx.restoreFromNode(node);
       render.hint(["/refresh to update content"]);
     } else {
-      render.warn("node not found in crawl tree");
-    }
-  } else if (ctx.crawlManager.hasStash()) {
-    // At start of current crawl — pop stash to return to previous domain
-    if (ctx.crawlManager.activeCrawl) {
-      try {
-        saveCrawl(ctx.crawlManager, ctx.state.log);
-        ctx.saveSessionSidecar();
-      } catch { /* save failed — continue */ }
-    }
-    const restored = ctx.crawlManager.popStash();
-    if (restored) {
-      const node = ctx.crawlManager.currentNodeId
-        ? ctx.crawlManager.getNode(ctx.crawlManager.currentNodeId)
-        : null;
-      if (node) {
-        try {
-          const hostname = new URL(node.url).hostname;
-          ctx.state.site = hostname.replace(/^www\./, "").split(".")[0];
-          ctx.engine.setBaseUrl(new URL(node.url).origin);
-        } catch { /* invalid URL */ }
-        ctx.restoreFromNode(node);
-        render.status(`returned to stashed crawl: "${restored.name}"`);
-        render.hint(["/refresh to update content"]);
+      // Node not in active crawl — check stash for cross-crawl navigation
+      const owner = ctx.crawlManager.findOwnerCrawl(entry.nodeId);
+      if (owner && owner.stashIndex >= 0) {
+        // Save current crawl before swapping
+        if (ctx.crawlManager.activeCrawl) {
+          try {
+            saveCrawl(ctx.crawlManager, ctx.state.log);
+            ctx.saveSessionSidecar();
+          } catch { /* save failed — continue */ }
+        }
+        ctx.crawlManager.swapToStash(owner.stashIndex);
+        const swappedNode = ctx.crawlManager.getNode(entry.nodeId);
+        if (swappedNode) {
+          ctx.crawlManager.navigateToNode(swappedNode.id);
+          try {
+            const hostname = new URL(swappedNode.url).hostname;
+            ctx.state.site = hostname.replace(/^www\./, "").split(".")[0];
+            ctx.engine.setBaseUrl(new URL(swappedNode.url).origin);
+          } catch { /* invalid URL */ }
+          ctx.restoreFromNode(swappedNode);
+          render.status(`returned to crawl: "${ctx.crawlManager.activeCrawl?.name}"`);
+          render.hint(["/refresh to update content"]);
+        }
+      } else {
+        render.warn("node not found in any crawl");
       }
     }
   } else {
@@ -130,11 +133,30 @@ export async function handleForward(ctx: ReplContext): Promise<void> {
   if (entry) {
     const node = ctx.crawlManager.getNode(entry.nodeId);
     if (node) {
+      // Node is in active crawl
       ctx.crawlManager.navigateToNode(node.id);
       ctx.restoreFromNode(node);
       render.hint(["/refresh to update content"]);
     } else {
-      render.warn("node not found in crawl tree");
+      // Node not in active crawl — check stash for cross-crawl navigation
+      const owner = ctx.crawlManager.findOwnerCrawl(entry.nodeId);
+      if (owner && owner.stashIndex >= 0) {
+        ctx.crawlManager.swapToStash(owner.stashIndex);
+        const swappedNode = ctx.crawlManager.getNode(entry.nodeId);
+        if (swappedNode) {
+          ctx.crawlManager.navigateToNode(swappedNode.id);
+          try {
+            const hostname = new URL(swappedNode.url).hostname;
+            ctx.state.site = hostname.replace(/^www\./, "").split(".")[0];
+            ctx.engine.setBaseUrl(new URL(swappedNode.url).origin);
+          } catch { /* invalid URL */ }
+          ctx.restoreFromNode(swappedNode);
+          render.status(`returned to crawl: "${ctx.crawlManager.activeCrawl?.name}"`);
+          render.hint(["/refresh to update content"]);
+        }
+      } else {
+        render.warn("node not found in any crawl");
+      }
     }
   } else {
     render.warn("no forward history");

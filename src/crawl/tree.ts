@@ -52,8 +52,6 @@ export interface StashedCrawl {
   nodes: Map<string, CrawlNode>;
   nodeIndex: Map<string, CrawlNode>;
   currentNodeId: string | null;
-  cursorHistory: CursorEntry[];
-  cursorIndex: number;
 }
 
 // ===================================================================
@@ -187,16 +185,16 @@ export class CrawlManager {
   }
 
   /**
-   * Clear only the active crawl state, preserving the stash.
-   * Used by /crawl end — user can still /back into stashed crawls.
+   * Clear only the active crawl state, preserving stash and cursor.
+   * Used by /crawl end — cursor entries referencing destroyed nodes
+   * will show "(untitled)" in /history display.
+   * Cursor is session-level; ending a crawl doesn't erase where you've been.
    */
   clearActive(): void {
     this.activeCrawl = null;
     this.currentNodeId = null;
     this.nodes.clear();
     this.nodeIndex.clear();
-    this.cursorHistory = [];
-    this.cursorIndex = -1;
   }
 
   // ---------------------------------------------------------------
@@ -215,16 +213,13 @@ export class CrawlManager {
       nodes: this.nodes,
       nodeIndex: this.nodeIndex,
       currentNodeId: this.currentNodeId,
-      cursorHistory: this.cursorHistory,
-      cursorIndex: this.cursorIndex,
     });
-    // Reset active state with fresh maps (moved old ones to stash)
+    // Reset active tree state with fresh maps (moved old ones to stash)
+    // Cursor is session-level — NOT reset here
     this.activeCrawl = null;
     this.currentNodeId = null;
     this.nodes = new Map();
     this.nodeIndex = new Map();
-    this.cursorHistory = [];
-    this.cursorIndex = -1;
     // Enforce cap
     if (this.stash.length > CrawlManager.MAX_STASH) {
       this.stash.shift(); // drop oldest
@@ -243,8 +238,7 @@ export class CrawlManager {
     this.nodes = entry.nodes;
     this.nodeIndex = entry.nodeIndex;
     this.currentNodeId = entry.currentNodeId;
-    this.cursorHistory = entry.cursorHistory;
-    this.cursorIndex = entry.cursorIndex;
+    // Cursor is session-level — NOT restored from stash
     return this.activeCrawl;
   }
 
@@ -257,31 +251,30 @@ export class CrawlManager {
   }
 
   /**
-   * Get a combined cursor history across stash (oldest first) + active crawl.
-   * Returns FullCursorEntry[] with crawl attribution for cross-crawl display.
+   * Get cursor history annotated with crawl ownership.
+   * Cursor is global (session-level), so this iterates the single cursorHistory
+   * and looks up which crawl each entry's node belongs to.
    */
   getFullCursorHistory(): FullCursorEntry[] {
     const result: FullCursorEntry[] = [];
-    for (let si = 0; si < this.stash.length; si++) {
-      const s = this.stash[si];
-      for (const entry of s.cursorHistory) {
+    for (const entry of this.cursorHistory) {
+      const owner = this.findOwnerCrawl(entry.nodeId);
+      if (owner) {
         result.push({
           ...entry,
-          crawlName: s.activeCrawl.name,
-          crawlId: s.activeCrawl.id,
-          stashIndex: si,
+          crawlName: owner.crawl.name,
+          crawlId: owner.crawl.id,
+          stashIndex: owner.stashIndex,
+        });
+      } else {
+        // Node not found in any crawl (e.g. crawl was ended/cleared)
+        result.push({
+          ...entry,
+          crawlName: "(ended)",
+          crawlId: "",
+          stashIndex: -2,
         });
       }
-    }
-    const activeName = this.activeCrawl?.name || "(active)";
-    const activeId = this.activeCrawl?.id || "";
-    for (const entry of this.cursorHistory) {
-      result.push({
-        ...entry,
-        crawlName: activeName,
-        crawlId: activeId,
-        stashIndex: -1,
-      });
     }
     return result;
   }
@@ -299,6 +292,58 @@ export class CrawlManager {
       if (node) return node;
     }
     return null;
+  }
+
+  /**
+   * Find which crawl owns a node by ID.
+   * Returns { stashIndex: -1, crawl } for active crawl, or { stashIndex: N, crawl } for stash.
+   * Returns null if the node is not found anywhere.
+   */
+  findOwnerCrawl(nodeId: string): { stashIndex: number; crawl: Crawl } | null {
+    // Check active crawl
+    if (this.nodes.has(nodeId) && this.activeCrawl) {
+      return { stashIndex: -1, crawl: this.activeCrawl };
+    }
+    // Check stash
+    for (let i = 0; i < this.stash.length; i++) {
+      if (this.stash[i].nodes.has(nodeId)) {
+        return { stashIndex: i, crawl: this.stash[i].activeCrawl };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Swap the active crawl with a stash entry at the given index.
+   * The current active tree goes to stash, the target comes out.
+   * Cursor is NOT touched — it's session-level.
+   */
+  swapToStash(stashIndex: number): boolean {
+    if (stashIndex < 0 || stashIndex >= this.stash.length) return false;
+
+    // Save current active to a temp stash entry
+    const currentActive: StashedCrawl | null = this.activeCrawl ? {
+      activeCrawl: this.activeCrawl,
+      nodes: this.nodes,
+      nodeIndex: this.nodeIndex,
+      currentNodeId: this.currentNodeId,
+    } : null;
+
+    // Extract target from stash
+    const [target] = this.stash.splice(stashIndex, 1);
+
+    // Restore target as active
+    this.activeCrawl = target.activeCrawl;
+    this.nodes = target.nodes;
+    this.nodeIndex = target.nodeIndex;
+    this.currentNodeId = target.currentNodeId;
+
+    // Push old active into stash (if there was one)
+    if (currentActive) {
+      this.stash.push(currentActive);
+    }
+
+    return true;
   }
 
   // ---------------------------------------------------------------
