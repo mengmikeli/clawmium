@@ -14,7 +14,10 @@ export function deriveCrawlName(rootUrl: string, summary: string, baseGoal: stri
     const firstClause = summary.split(/[,;.\u2014—]/)[0].trim();
     if (firstClause.length > 0) {
       const lowered = firstClause.charAt(0).toLowerCase() + firstClause.slice(1);
-      return lowered.slice(0, 50);
+      if (lowered.length <= 50) return lowered;
+      const truncated = lowered.slice(0, 50);
+      const lastSpace = truncated.lastIndexOf(" ");
+      return lastSpace > 20 ? truncated.slice(0, lastSpace) : truncated;
     }
   }
 

@@ -116,7 +116,7 @@ export async function handleCrawl(ctx: ReplContext, arg: string, parts: string[]
   switch (sub) {
     case "list": {
       const ids = listCrawls();
-      if (ids.length === 0) {
+      if (ids.length === 0 && !ctx.crawlManager.activeCrawl) {
         render.status("no saved crawls");
         return;
       }
@@ -127,7 +127,12 @@ export async function handleCrawl(ctx: ReplContext, arg: string, parts: string[]
       }
       crawls.sort((a, b) => b.created - a.created);
       crawls.forEach((c, i) => { c.index = i + 1; });
-      render.crawlList(crawls);
+      if (crawls.length > 0) render.crawlList(crawls);
+      // Show active in-memory crawl if not already in saved list
+      const active = ctx.crawlManager.activeCrawl;
+      if (active && !ids.includes(active.id)) {
+        render.activeCrawlIndicator(active.name, ctx.crawlManager.nodes.size);
+      }
       ctx.logCommand("/crawl list");
       return;
     }
@@ -169,12 +174,18 @@ export async function handleCrawl(ctx: ReplContext, arg: string, parts: string[]
         render.status("stashing active crawl...");
         ctx.stashCrawl();
       }
+      const preLoadStash = [...ctx.crawlManager.stash]; // snapshot before overwrite
 
       const loaded = loadCrawl(picked.id, ctx.crawlManager);
       if (!loaded) {
         render.error("failed to load crawl");
         return;
       }
+
+      // Merge: pre-load stash entries go in front of loaded session's stash
+      ctx.crawlManager.stash = [...preLoadStash, ...ctx.crawlManager.stash];
+      // Enforce cap (drop oldest)
+      while (ctx.crawlManager.stash.length > 10) ctx.crawlManager.stash.shift();
 
       const currentNode = ctx.crawlManager.currentNodeId
         ? ctx.crawlManager.getNode(ctx.crawlManager.currentNodeId)

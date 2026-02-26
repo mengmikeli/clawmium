@@ -343,6 +343,11 @@ export function crawlList(crawls: Array<{ index: number; name: string; rootUrl: 
   console.log();
 }
 
+export function activeCrawlIndicator(name: string, nodeCount: number): void {
+  const truncName = name.length > 50 ? name.slice(0, 47) + "..." : name;
+  console.log(`  ${DIM}▸ (active) ${truncName} · ${nodeCount} node${nodeCount !== 1 ? "s" : ""}${RESET}`);
+}
+
 export function crawlInfo(name: string, created: number, nodeCount: number, rootUrl: string, currentNodeTitle: string): void {
   const date = new Date(created);
   const dateStr = date.toLocaleDateString("en-US", {

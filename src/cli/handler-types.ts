@@ -25,6 +25,7 @@ export interface SessionState {
   homeUrl: string;
   currentUrl: string;
   pendingReachedBy: ReachedBy;
+  pendingForceRefresh?: boolean;
   debugEnabled: boolean;
 }
 

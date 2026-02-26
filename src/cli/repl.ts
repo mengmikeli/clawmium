@@ -1178,6 +1178,15 @@ export class Repl {
    */
   private storeStateOnNode(interpretation: PageInterpretation): void {
     if (!this.crawlManager.currentNodeId) return;
+    const node = this.crawlManager.getNode(this.crawlManager.currentNodeId);
+    if (!node) return;
+
+    // Snapshot semantics: preserve first-visit interpretation unless explicit refresh
+    if (node.metadata?.interpretation && !this.state.pendingForceRefresh) {
+      return; // keep original snapshot
+    }
+    this.state.pendingForceRefresh = false; // consume the flag
+
     const meta: { summary?: string; interpretation?: PageInterpretation; goalContext?: GoalContext } = {};
     if (interpretation.summary) meta.summary = interpretation.summary;
     meta.interpretation = interpretation;
@@ -1185,11 +1194,8 @@ export class Repl {
     this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, meta);
 
     // Classify the current node
-    const node = this.crawlManager.getNode(this.crawlManager.currentNodeId);
-    if (node) {
-      const classification = classifyNodeHeuristic(node, this.crawlManager.nodes, this.crawlManager.cursorHistory);
-      this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, { classification });
-    }
+    const classification = classifyNodeHeuristic(node, this.crawlManager.nodes, this.crawlManager.cursorHistory);
+    this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, { classification });
   }
 
   /**

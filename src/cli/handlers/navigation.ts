@@ -112,7 +112,11 @@ export async function handleBack(ctx: ReplContext): Promise<void> {
       }
     }
   } else {
-    render.warn("no history to go back to");
+    if (ctx.crawlManager.cursorHistory.length > 0) {
+      render.warn("already at start of history");
+    } else {
+      render.warn("no history to go back to");
+    }
   }
   ctx.logCommand("/back");
 }
@@ -146,6 +150,7 @@ export async function handleRefresh(ctx: ReplContext): Promise<void> {
   await ctx.syncBrowser();
   render.status("refreshing page...");
   ctx.interceptor.clear();
+  ctx.state.pendingForceRefresh = true;
   await ctx.processCurrentPage();
   ctx.logCommand("/refresh");
 }
