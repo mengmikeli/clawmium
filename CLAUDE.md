@@ -44,7 +44,7 @@ clawmium/
 │   │   └── goals.ts         # formatGoal(), addBreadcrumb()
 │   ├── output/writer.ts     # Save data + session logs to ~/clm/{site}/
 │   ├── auto/                # executor.ts (shared executeChoice), runner.ts (autonomous loop)
-│   └── __test__*.ts         # 10 test suites (see Running section)
+│   └── __test__*.ts         # 11 test suites (see Running section)
 ├── cityserve/               # Mock government website — server.ts, public/, api/, data/
 └── learnings/               # Session learnings, design specs, TODO.md
 ```
@@ -63,10 +63,10 @@ Human (terminal)  →  CLM REPL  →  LLM (interpret page, extract data)
 
 1. Human launches CLM — headless Chromium navigates to target URL
 2. For each page:
-   a. Network interceptor passively captures same-origin JSON responses
+   a. Network interceptor passively captures same-origin JSON responses + markdown responses
    b. DOM content extracted (title, visible text, links, forms)
    b2. A11y tree extracted via Playwright's `_snapshotForAI()` — YAML with `[ref=...]` identifiers (graceful fallback to null)
-   c. If sparse DOM content (<500 chars), try network JSON for article text, then scroll-to-load
+   c. Content pipeline: markdown (from `text/markdown` response) → DOM text → network JSON → scroll-to-load
    d. Page content + a11y tree sent to LLM with user's goal and conversation context
    e. LLM returns content-first interpretation: summary + navigation choices with `ref` identifiers (CSS selectors as fallback)
    f. CLI renders summary (content box for articles, navSummary for navigation pages) then numbered choices
@@ -96,7 +96,7 @@ Key prompt rules:
 
 ### Network Interception
 
-Two-tier capture: (1) `/api/` routes (same-origin) — logged, used for data extraction. (2) All same-origin JSON — captured silently for `findRichContent()` (skips analytics/config, requires sentence-like text 30+ words, recursively walks JSON prioritizing `body`/`content`/`text`/`article` fields).
+Three-tier capture: (1) **Markdown** — `context.route()` overrides Accept header on document requests to prefer `text/markdown`; `NetworkInterceptor` stores the longest response (>200 chars, cap 8000). (2) `/api/` routes (same-origin) — logged, used for data extraction. (3) All same-origin JSON — captured silently for `findRichContent()` (skips analytics/config, requires sentence-like text 30+ words, recursively walks JSON prioritizing `body`/`content`/`text`/`article` fields).
 
 ### Auth Handoff
 
@@ -245,7 +245,7 @@ npm run clm -- --new                       # Skip session resume
 # CityServe demo
 npm run cityserve       # Start mock site on :3000, then /demo in REPL
 
-# Tests (10 suites)
+# Tests (11 suites)
 npm run test:repl          # REPL command handlers
 npm run test:auto          # Auto mode runner + executor
 npm run test:crawl         # Crawl tree + persistence + stash
@@ -256,6 +256,7 @@ npm run test:crawl-llm     # Crawl LLM integration
 npm run test:phase5        # Form detection, HN, goals
 npm run test:aria          # A11y tree extraction
 npm run test:recover       # Browser crash recovery
+npm run test:markdown      # Markdown content pipeline (needs network)
 npm run test:browser       # Browser integration (needs CityServe)
 npm run test:llm           # LLM provider test
 ```
