@@ -11,7 +11,6 @@ import { buildHomepage, renderHomepage, homepageTotal, homepageCrawlAt } from ".
 import { listCrawlsWithMeta, loadCrawl, saveCrawl } from "./crawl/persistence";
 import { classifyCrawlHeuristic, formatCrawlForClassification, classifyCrawlLLM } from "./crawl/classify";
 import { CrawlManager } from "./crawl/tree";
-import { saveSession } from "./session/persistence";
 
 function createProvider(): { provider: LLMProvider; name: string } {
   const providerName = process.env.LLM_PROVIDER || "anthropic";
@@ -84,15 +83,9 @@ async function main() {
               sensitive: result.sensitive,
             });
             saveCrawl(m);
-            saveSession({
-              manager: m,
-              currentUrl: m.currentNodeId ? m.getNode(m.currentNodeId)?.url || "" : "",
-              site: "",
-              homeUrl: "",
-              goalContext: { baseGoal: "", activeIntent: "", breadcrumb: [] },
-              history: [],
-              log: [],
-            });
+            // NOTE: Do NOT call saveSession() here — it would overwrite the
+            // real session sidecar with empty state. The .md file is sufficient
+            // for updating lifecycle metadata.
           }
         }
       } catch {

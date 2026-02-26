@@ -47,15 +47,19 @@ export async function handleGoto(ctx: ReplContext, arg: string): Promise<void> {
     return;
   }
   let url = arg;
-  let isExternal = false;
+  // Resolve to a full URL first
   if (/^https?:\/\//.test(url)) {
-    isExternal = true;
+    // already absolute
   } else if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(url)) {
     url = `https://${url}`;
-    isExternal = true;
   } else {
     url = `${ctx.engine.getBaseUrl()}${url.startsWith("/") ? "" : "/"}${url}`;
   }
+  // Compare origins to decide whether to stash the current crawl
+  const currentOrigin = ctx.engine.getBaseUrl();
+  let newOrigin: string;
+  try { newOrigin = new URL(url).origin; } catch { newOrigin = ""; }
+  const isExternal = newOrigin !== currentOrigin;
   if (isExternal) {
     ctx.stashCrawl();
     ctx.state.goalContext = { baseGoal: `browsing ${new URL(url).hostname}`, activeIntent: "", breadcrumb: [] };
