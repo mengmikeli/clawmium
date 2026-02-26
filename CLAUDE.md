@@ -34,17 +34,18 @@ clawmium/
 │   ├── auth/                # detector.ts (login heuristics), handoff.ts (CLI auth, raw stdin)
 │   ├── sites/hn.ts          # HN comment extraction + LLM formatting
 │   ├── forms/detector.ts    # Interactive form detection (search, filter)
-│   ├── crawl/               # tree.ts (CrawlManager), persistence.ts, context.ts, namer.ts
-│   ├── session/persistence.ts # SessionEnvelope v3 — JSON sidecar for full session resume
+│   ├── crawl/               # tree.ts (CrawlManager), persistence.ts, context.ts, namer.ts, classify.ts, prune.ts, merge.ts
+│   ├── session/persistence.ts # SessionEnvelope v5 — JSON sidecar for full session resume
 │   ├── cli/
 │   │   ├── repl.ts          # REPL core — dispatch map, choice execution, navigateAndProcess()
 │   │   ├── handler-types.ts # SessionState, ReplContext, CommandHandler types
-│   │   ├── handlers/        # navigation.ts (8 cmds), session.ts (8 cmds), crawl.ts (4 cmds)
+│   │   ├── handlers/        # navigation.ts (8 cmds), session.ts (8 cmds), crawl.ts (10 subcommands)
 │   │   ├── renderer.ts      # ANSI terminal output (banner, contentBox, navSummary, etc.)
+│   │   ├── homepage.ts      # Homepage dashboard (replaces resume prompt)
 │   │   └── goals.ts         # formatGoal(), addBreadcrumb()
-│   ├── output/writer.ts     # Save data + session logs to ~/clm/{site}/
+│   ├── output/writer.ts     # Save data + session logs to ~/clm/{site}/, global history persistence
 │   ├── auto/                # executor.ts (shared executeChoice), runner.ts (autonomous loop)
-│   └── __test__*.ts         # 11 test suites (see Running section)
+│   └── __test__*.ts         # 18 test suites (see Running section)
 ├── cityserve/               # Mock government website — server.ts, public/, api/, data/
 └── learnings/               # Session learnings, design specs, TODO.md
 ```
@@ -135,9 +136,9 @@ Navigation fallback chain: `networkidle` (15s) → `domcontentloaded` (15s) → 
 
 State interfaces defined in `src/cli/handler-types.ts` — `GoalContext` (baseGoal + activeIntent + breadcrumb trail) and `SessionState` (current URL, interpretations, conversation history, forms, etc.). See `learnings/architecture-reference.md` for full interface definitions.
 
-**Cursor history**: `CrawlManager.cursorHistory` is a linear `CursorEntry[]` log; `cursorIndex` tracks position for back/forward. New navigation truncates forward entries. Capped at 200.
+**Cursor history**: Global (session-level), not per-crawl. `CrawlManager.cursorHistory` is a linear `CursorEntry[]` log; `cursorIndex` tracks position for back/forward. Back/forward work across crawl boundaries via `findOwnerCrawl()` + `swapToStash()`. New navigation truncates forward entries. Capped at 200.
 
-**Crawl stash**: External `/goto` stashes the active crawl onto `CrawlManager.stash[]` instead of destroying it. `/back` at crawl start pops the stash. `/history` shows combined entries. Capped at 10. `SessionEnvelope` v3 serializes the full stash.
+**Crawl stash**: External `/goto` stashes the active crawl onto `CrawlManager.stash[]` instead of destroying it. `/back` at crawl start pops the stash. Capped at 10. `SessionEnvelope` v5 serializes the full stash.
 
 Key state behaviors:
 - **REPL owns position**: `state.currentUrl` is set after every `nav.goto()`, never read from `page.url()`. All operations use `currentUrl`.
@@ -146,7 +147,7 @@ Key state behaviors:
 - **Previous interpretation**: Old choices preserved; stale number entry asks "did you mean [N] label? (y/n)"
 - **Conversation context**: Free-text follow-ups pass `"Previous summary: ...\nUser asks: ..."` to the LLM.
 - **Form detection**: `detectInteractiveForms(page)` runs on each page load. Detected forms become fill choices via `appendSystemChoices()`, deduped by `inputSelector`. Ordering: LLM choices → detected forms → login.
-- **Session persistence**: `.session.json` sidecar written on shutdown + every 60s. Contains full `SessionEnvelope` v3. On startup, recent session (< 7 days) prompts resume. `--new` bypasses.
+- **Session persistence**: `.session.json` sidecar written on shutdown + every 60s (with persistent history flush). Contains full `SessionEnvelope` v5. On startup, recent session (< 7 days) shows homepage dashboard. `--new` bypasses.
 
 Guard flags:
 - `shuttingDown` — prevents double shutdown (rl.close fires close event)
@@ -157,11 +158,13 @@ Guard flags:
 
 Every navigation is recorded as a node in a tree. The tree persists to markdown at `~/clm/crawls/`, capturing the browsing path with LLM summaries. CrawlManager auto-creates crawls, deduplicates by URL, supports cursor history and cross-domain stash. See `learnings/architecture-reference.md` for method-level API details.
 
+**Crawl intelligence**: Crawls have lifecycle states (open/done/overdue/stale) determined by heuristic + LLM classification (`src/crawl/classify.ts`). Auto-prune removes dead-end branches on shutdown (`src/crawl/prune.ts`). Merge candidates are detected by overlapping URLs and can be grafted together (`src/crawl/merge.ts`). The homepage dashboard (`src/cli/homepage.ts`) replaces the old resume prompt, showing active crawls with lifecycle status and persistent history.
+
 **`pendingReachedBy` pattern**: The REPL sets `state.pendingReachedBy` before navigation (e.g., "choice", "goto"). `trackNavigation()` consumes it after the page loads to record how the user reached the new page. This decouples navigation intent from navigation execution.
 
 ### Command Handler Architecture
 
-Slash commands dispatched through `COMMAND_HANDLERS` map in `repl.ts`. Each handler receives a `ReplContext` dependency bag (state, engine, nav, interceptor, llm, crawlManager, rl, render, + 22 bound methods). Handler files in `src/cli/handlers/`: `navigation.ts` (8 cmds), `session.ts` (8 cmds), `crawl.ts` (4 cmds with subcommands). See `learnings/architecture-reference.md` for full `ReplContext` interface.
+Slash commands dispatched through `COMMAND_HANDLERS` map in `repl.ts`. Each handler receives a `ReplContext` dependency bag (state, engine, nav, interceptor, llm, crawlManager, rl, render, + 22 bound methods). Handler files in `src/cli/handlers/`: `navigation.ts` (8 cmds), `session.ts` (8 cmds), `crawl.ts` (10 subcommands). See `learnings/architecture-reference.md` for full `ReplContext` interface.
 
 ### LLM Provider Interface
 
@@ -183,6 +186,7 @@ MAX_TOKENS_INTERPRET=2048    # optional, defaults shown
 MAX_TOKENS_PLAN=512
 MAX_TOKENS_EXTRACT=1024
 AUTO_MAX_STEPS=10            # optional, default: 10
+MAX_CHOICES=30               # optional, max navigation choices per page
 # DEBUG=1                    # inline diagnostic output
 ```
 
@@ -201,10 +205,10 @@ Token limits configurable per method via env vars. Both providers use shared `to
 | `/refresh` | Re-navigate to current URL and re-interpret |
 | `/url` | Show current URL (one line, copy-pasteable) |
 | `/stack` | Show navigation stack with titles, sync status, back/forward |
-| `/history [N]` | Show visit history (with N: jump to entry N) |
+| `/history [N | all]` | Persistent cross-session visit log (with N: jump to entry N, all: show full history) |
 | `/save` | Save extracted data + session log to disk |
 | `/tree` | Show crawl navigation tree (enriched: summaries, icons, current marker) |
-| `/crawl` | Manage crawls: list, load, rename, end, info |
+| `/crawl` | Manage crawls: list, load, rename, end, info, done, pin, status, prune, merge |
 | `/clear` | Reset state: repl, crawl, browser, or all (crawl auto-saves) |
 | `/auto <goal> [--max-steps N]` | Autonomous browsing loop — interpret → plan → execute until goal met or limit hit |
 | `/debug` | Toggle inline debug output (LLM I/O, a11y, execution paths) |
@@ -245,7 +249,7 @@ npm run clm -- --new                       # Skip session resume
 # CityServe demo
 npm run cityserve       # Start mock site on :3000, then /demo in REPL
 
-# Tests (11 suites)
+# Tests (18 suites)
 npm run test:repl          # REPL command handlers
 npm run test:auto          # Auto mode runner + executor
 npm run test:crawl         # Crawl tree + persistence + stash
@@ -259,6 +263,11 @@ npm run test:recover       # Browser crash recovery
 npm run test:markdown      # Markdown content pipeline (needs network)
 npm run test:browser       # Browser integration (needs CityServe)
 npm run test:llm           # LLM provider test
+npm run test:classify      # Crawl lifecycle classification
+npm run test:homepage      # Homepage dashboard
+npm run test:prune         # Crawl dead-end pruning
+npm run test:merge         # Crawl merge candidates + graft
+npm run test:classify-llm  # Crawl classification LLM integration
 ```
 
 ## File Output
@@ -268,6 +277,7 @@ Saved to `~/clm/{site}/{resource}-{date}.json`:
 ```
 ~/clm/
   config.json                  # homeUrl + lastSessionId
+  history.json                 # Persistent cross-session visit log (capped at 1000)
   crawls/
     {crawl-id}.md              # Saved crawl tree + session log (human-readable)
     {crawl-id}.session.json    # Full session state (machine-readable, for resume)
