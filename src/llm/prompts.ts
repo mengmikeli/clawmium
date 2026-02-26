@@ -1,4 +1,10 @@
-export const INTERPRET_SYSTEM_PROMPT = `You are a browser agent analyzing web page content for a user. Given the page's text, links, and forms, determine what this page offers and how it relates to the user's goal.
+function maxChoices(): number {
+  const v = parseInt(process.env.MAX_CHOICES || "", 10);
+  return v > 0 ? v : 10;
+}
+
+export function INTERPRET_SYSTEM_PROMPT(): string {
+  return `You are a browser agent analyzing web page content for a user. Given the page's text, links, and forms, determine what this page offers and how it relates to the user's goal.
 
 Respond with ONLY valid JSON matching this schema:
 {
@@ -32,13 +38,14 @@ Rules:
   - When NO accessibility tree is provided, use CSS selectors only (omit ref fields)
 - The accessibility tree uses YAML format: indentation = parent-child structure, roles (link, button, heading, textbox, navigation, main...), names in quotes (link "Sign In"), ref identifiers ([ref=s1e2])
 - Index choices starting at 1
-- Limit choices to the 10 most relevant options
+- Limit choices to the ${maxChoices()} most relevant options
 - If the visible text is empty or very short, set summary to "Page content is empty (possible anti-bot protection, paywall, or lazy loading)" and return empty choices. Do NOT guess or fabricate content from the URL alone.
 - FOLLOW-UP QUESTIONS: If "Conversation context" is provided, the user is asking a follow-up question about the page. In this case, answer their specific question in the "summary" field using the page content. Do NOT just re-describe the page — directly address what they asked. For example, if they ask "why is this important", explain the significance. If they ask "what are the key takeaways", provide bullet points. You may return fewer or no choices for follow-up responses.
 - HACKER NEWS LISTINGS: For Hacker News listing pages (news.ycombinator.com front page, /newest, /best, etc.): each story has a title link (external article) and a comments link (item?id=...). Include BOTH as separate choices so the user can choose between reading the article and reading the discussion. Format: "Story Title" for article, "Story Title (comments)" for the discussion page.
 - HACKER NEWS DISCUSSIONS: For Hacker News discussion pages (item?id=...): the content includes a comment thread. Summarize the key themes and notable perspectives. Set pageType to "content". Do NOT list individual comments as choices.
 - INTERACTIVE FORMS: When the page has fillable forms (search boxes, filters, text inputs), include them as choices with action: "fill" and a fillPlan object. fillPlan has: inputSelector (CSS selector for the input/textarea to fill — prefer #id, then [name="..."], then tag-based), submitAction ("enter" to press Enter on the input, or "click" to click a submit button), submitSelector (CSS selector for the submit button — required when submitAction is "click"). Label should describe the action: "Search Google", "Search packages", "Filter by date", etc. Use the form data provided (form IDs, input names/types/labels/placeholders) to build accurate selectors. Do NOT emit fill choices for password/login forms (handled separately by the auth system).
 - NAVIGATION PATH: If a "Navigation path" section is provided in the conversation context, it shows the user's browsing journey to this page. Use it to: (1) avoid repeating what they've already seen, (2) prioritize choices that advance their goal, (3) recognize whether they've found what they're looking for. Do NOT summarize the navigation path itself.`;
+}
 
 export const PLAN_ACTION_SYSTEM_PROMPT = `You are a browser agent deciding the next action to take. Given a page interpretation and conversation context, decide what to do next.
 

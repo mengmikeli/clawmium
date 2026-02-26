@@ -39,7 +39,7 @@ export class OpenAIProvider implements LLMProvider {
       max_tokens: tokenLimit("MAX_TOKENS_INTERPRET", 2048),
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: INTERPRET_SYSTEM_PROMPT },
+        { role: "system", content: INTERPRET_SYSTEM_PROMPT() },
         { role: "user", content: userMessage },
       ],
     });
