@@ -5,6 +5,7 @@ import { listCrawls, peekCrawl, loadCrawl, saveCrawl, listCrawlsWithMeta } from 
 import { CrawlLifecycle, CrawlTag } from "../../crawl/classify";
 import { pruneCrawl } from "../../crawl/prune";
 import { findMergeCandidates, graftCrawl } from "../../crawl/merge";
+import { loadGlobalHistory } from "../../output/writer";
 
 // ANSI color helpers
 const RESET = "\x1b[0m";
@@ -68,25 +69,26 @@ export async function handleStack(ctx: ReplContext): Promise<void> {
 // ===================================================================
 
 export async function handleHistory(ctx: ReplContext, arg: string): Promise<void> {
-  if (arg) {
-    const n = parseInt(arg, 10);
+  const trimmed = arg.trim();
+
+  // /history N — jump to session cursor entry (unchanged behavior)
+  if (trimmed && trimmed !== "all") {
+    const n = parseInt(trimmed, 10);
     if (isNaN(n)) {
-      render.error("usage: /history [N]");
+      render.error("usage: /history [N | all]");
       return;
     }
     await ctx.jumpToHistory(n);
     ctx.logCommand(`/history ${n}`);
     return;
   }
-  const fullCursor = ctx.crawlManager.getFullCursorHistory();
-  if (fullCursor.length === 0) {
-    render.status("no visit history yet — navigate to start recording");
-    return;
-  }
-  // Global cursor — cursorIndex IS the full index directly
-  const fullCurrentIdx = ctx.crawlManager.cursorIndex;
 
-  const histEntries: render.HistoryEntry[] = fullCursor.map((entry, i) => {
+  const showAll = trimmed === "all";
+
+  // Build current-session entries (jumpable)
+  const fullCursor = ctx.crawlManager.getFullCursorHistory();
+  const fullCurrentIdx = ctx.crawlManager.cursorIndex;
+  const sessionEntries: render.HistoryEntry[] = fullCursor.map((entry, i) => {
     const node = ctx.crawlManager.getNodeAcrossStash(entry.nodeId);
     return {
       index: i + 1,
@@ -94,14 +96,40 @@ export async function handleHistory(ctx: ReplContext, arg: string): Promise<void
       url: node?.url || "",
       reachedBy: entry.reachedBy,
       timestamp: entry.timestamp,
-      summary: node?.metadata?.summary,
       isCurrent: i === fullCurrentIdx,
       crawlName: (entry as FullCursorEntry).crawlName,
     };
   });
-  render.historyList(histEntries);
-  render.hint(["type /history N to jump to an entry"]);
-  ctx.logCommand("/history");
+
+  // Load persistent history (past sessions)
+  const allPersisted = loadGlobalHistory();
+
+  // Filter out entries that overlap with the current session by timestamp
+  const sessionTimestamps = new Set(fullCursor.map(e => e.timestamp));
+  const pastOnly = allPersisted.filter(e => !sessionTimestamps.has(e.timestamp));
+
+  // How many past entries to show
+  const maxPast = showAll ? pastOnly.length : 20;
+  const shownPast = pastOnly.slice(Math.max(0, pastOnly.length - maxPast));
+
+  const pastEntries: render.PersistentHistoryEntry[] = shownPast.map(e => ({
+    title: e.title,
+    url: e.url,
+    reachedBy: e.reachedBy,
+    timestamp: e.timestamp,
+    crawlName: e.crawlName,
+  }));
+
+  render.persistentHistoryList({
+    pastEntries,
+    sessionEntries,
+    totalPersisted: pastOnly.length,
+  });
+
+  if (sessionEntries.length > 0) {
+    render.hint(["type /history N to jump to a session entry"]);
+  }
+  ctx.logCommand(showAll ? "/history all" : "/history");
 }
 
 // ===================================================================

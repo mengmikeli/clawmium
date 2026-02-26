@@ -3,6 +3,7 @@ import * as path from "path";
 import { CrawlManager, CrawlNode, Crawl, CursorEntry, ReachedBy, StashedCrawl } from "../crawl/tree";
 import { PageInterpretation, GoalContext } from "../llm/provider";
 import { CrawlMeta } from "../crawl/classify";
+import { GlobalHistoryEntry } from "../output/writer";
 
 // ===================================================================
 // Types
@@ -329,4 +330,39 @@ export function findLastSession(maxAgeDays = 7): { crawlId: string; envelope: Se
   }
 
   return best ? { crawlId: best.crawlId, envelope: best.envelope } : null;
+}
+
+// ===================================================================
+// History extraction (cursor → GlobalHistoryEntry[])
+// ===================================================================
+
+/**
+ * Convert cursor entries (from startIndex onward) to GlobalHistoryEntry[].
+ * Resolves nodeId → url/title via getNodeAcrossStash, and crawl ownership
+ * via findOwnerCrawl.
+ */
+export function extractHistoryEntries(
+  manager: CrawlManager,
+  startIndex = 0,
+): GlobalHistoryEntry[] {
+  const entries: GlobalHistoryEntry[] = [];
+  const cursor = manager.cursorHistory;
+
+  for (let i = startIndex; i < cursor.length; i++) {
+    const ce = cursor[i];
+    const node = manager.getNodeAcrossStash(ce.nodeId);
+    if (!node) continue; // orphaned node — skip
+
+    const owner = manager.findOwnerCrawl(ce.nodeId);
+    entries.push({
+      url: node.url,
+      title: node.title,
+      timestamp: ce.timestamp,
+      reachedBy: ce.reachedBy,
+      crawlId: owner?.crawl.id ?? "",
+      crawlName: owner?.crawl.name ?? "(ended)",
+    });
+  }
+
+  return entries;
 }

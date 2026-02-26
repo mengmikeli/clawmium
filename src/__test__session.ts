@@ -10,8 +10,15 @@ import {
   findLastSession,
   setSessionDir,
   SessionEnvelope,
+  extractHistoryEntries,
 } from "./session/persistence";
 import { saveCrawl, loadCrawl, setCrawlDir } from "./crawl/persistence";
+import {
+  GlobalHistoryEntry,
+  loadGlobalHistory,
+  appendGlobalHistory,
+  setHistoryPath,
+} from "./output/writer";
 
 let passed = 0;
 let failed = 0;
@@ -979,6 +986,173 @@ async function main() {
     assert(fullAfter[1].stashIndex === -1, "second entry is from active");
   }
   console.log();
+
+  // ---------------------------------------------------------------
+  // GROUP: Persistent global history (new)
+  // ---------------------------------------------------------------
+  console.log("--- Persistent global history ---\n");
+
+  const HISTORY_FILE = path.join(TEST_DIR, "history.json");
+  setHistoryPath(HISTORY_FILE);
+
+  console.log("loadGlobalHistory — returns [] for missing file...");
+  {
+    if (fs.existsSync(HISTORY_FILE)) fs.unlinkSync(HISTORY_FILE);
+    const entries = loadGlobalHistory();
+    assert(entries.length === 0, "empty array for missing file");
+  }
+  console.log();
+
+  console.log("appendGlobalHistory — writes entries and loads them back...");
+  {
+    if (fs.existsSync(HISTORY_FILE)) fs.unlinkSync(HISTORY_FILE);
+    const entries: GlobalHistoryEntry[] = [
+      { url: "https://a.com", title: "A", timestamp: 1000, reachedBy: "goto", crawlId: "c1", crawlName: "crawl-a" },
+      { url: "https://b.com", title: "B", timestamp: 2000, reachedBy: "choice", crawlId: "c1", crawlName: "crawl-a" },
+    ];
+    appendGlobalHistory(entries);
+    const loaded = loadGlobalHistory();
+    assert(loaded.length === 2, `wrote 2 entries (got ${loaded.length})`);
+    assert(loaded[0].url === "https://a.com", "first entry URL");
+    assert(loaded[1].title === "B", "second entry title");
+    assert(loaded[1].reachedBy === "choice", "second entry reachedBy");
+  }
+  console.log();
+
+  console.log("appendGlobalHistory — dedup by timestamp...");
+  {
+    if (fs.existsSync(HISTORY_FILE)) fs.unlinkSync(HISTORY_FILE);
+    const first: GlobalHistoryEntry[] = [
+      { url: "https://a.com", title: "A", timestamp: 1000, reachedBy: "goto", crawlId: "c1", crawlName: "c" },
+    ];
+    appendGlobalHistory(first);
+    // Append same timestamp again
+    appendGlobalHistory(first);
+    const loaded = loadGlobalHistory();
+    assert(loaded.length === 1, `deduped to 1 entry (got ${loaded.length})`);
+  }
+  console.log();
+
+  console.log("appendGlobalHistory — idempotent flush (same entries twice)...");
+  {
+    if (fs.existsSync(HISTORY_FILE)) fs.unlinkSync(HISTORY_FILE);
+    const entries: GlobalHistoryEntry[] = [
+      { url: "https://a.com", title: "A", timestamp: 1000, reachedBy: "goto", crawlId: "c1", crawlName: "c" },
+      { url: "https://b.com", title: "B", timestamp: 2000, reachedBy: "choice", crawlId: "c1", crawlName: "c" },
+      { url: "https://c.com", title: "C", timestamp: 3000, reachedBy: "goto", crawlId: "c1", crawlName: "c" },
+    ];
+    appendGlobalHistory(entries);
+    appendGlobalHistory(entries); // idempotent
+    const loaded = loadGlobalHistory();
+    assert(loaded.length === 3, `still 3 after idempotent flush (got ${loaded.length})`);
+  }
+  console.log();
+
+  console.log("appendGlobalHistory — caps at 1000 entries...");
+  {
+    if (fs.existsSync(HISTORY_FILE)) fs.unlinkSync(HISTORY_FILE);
+    // Write 999 entries first
+    const batch1: GlobalHistoryEntry[] = [];
+    for (let i = 0; i < 999; i++) {
+      batch1.push({ url: `https://old-${i}.com`, title: `Old ${i}`, timestamp: i, reachedBy: "goto", crawlId: "c", crawlName: "c" });
+    }
+    appendGlobalHistory(batch1);
+    // Add 10 more (should cap at 1000, dropping oldest 9)
+    const batch2: GlobalHistoryEntry[] = [];
+    for (let i = 0; i < 10; i++) {
+      batch2.push({ url: `https://new-${i}.com`, title: `New ${i}`, timestamp: 1000 + i, reachedBy: "goto", crawlId: "c", crawlName: "c" });
+    }
+    appendGlobalHistory(batch2);
+    const loaded = loadGlobalHistory();
+    assert(loaded.length === 1000, `capped at 1000 (got ${loaded.length})`);
+    // Oldest entries should be dropped (timestamps 0-8 should be gone)
+    assert(loaded[0].timestamp === 9, `oldest kept is timestamp 9 (got ${loaded[0].timestamp})`);
+    assert(loaded[loaded.length - 1].timestamp === 1009, `newest is timestamp 1009 (got ${loaded[loaded.length - 1].timestamp})`);
+  }
+  console.log();
+
+  console.log("extractHistoryEntries — resolves nodeIds to entries...");
+  {
+    const m = new CrawlManager();
+    m.createCrawl("https://a.com", "Page A", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
+    const childNode = m.addNavigation("https://b.com", "Page B", "choice");
+    m.appendCursor(childNode.id, "choice");
+
+    const extracted = extractHistoryEntries(m);
+    assert(extracted.length === 2, `extracted 2 entries (got ${extracted.length})`);
+    assert(extracted[0].url === "https://a.com", "first entry url");
+    assert(extracted[0].title === "Page A", "first entry title");
+    assert(extracted[0].reachedBy === "goto", "first entry reachedBy");
+    assert(extracted[1].url === "https://b.com", "second entry url");
+    assert(extracted[1].title === "Page B", "second entry title");
+    assert(extracted[1].reachedBy === "choice", "second entry reachedBy");
+    assert(extracted[0].crawlName !== "", "first entry has crawlName");
+    assert(extracted[0].crawlId !== "", "first entry has crawlId");
+  }
+  console.log();
+
+  console.log("extractHistoryEntries — startIndex parameter...");
+  {
+    const m = new CrawlManager();
+    m.createCrawl("https://a.com", "A", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
+    const bNode = m.addNavigation("https://b.com", "B", "choice");
+    m.appendCursor(bNode.id, "choice");
+    const cNode = m.addNavigation("https://c.com", "C", "choice");
+    m.appendCursor(cNode.id, "choice");
+
+    const fromIndex1 = extractHistoryEntries(m, 1);
+    assert(fromIndex1.length === 2, `2 entries from index 1 (got ${fromIndex1.length})`);
+    assert(fromIndex1[0].url === "https://b.com", "first entry from index 1 is B");
+
+    const fromIndex2 = extractHistoryEntries(m, 2);
+    assert(fromIndex2.length === 1, `1 entry from index 2 (got ${fromIndex2.length})`);
+    assert(fromIndex2[0].url === "https://c.com", "entry from index 2 is C");
+
+    const fromEnd = extractHistoryEntries(m, 3);
+    assert(fromEnd.length === 0, `0 entries from index 3 (got ${fromEnd.length})`);
+  }
+  console.log();
+
+  console.log("extractHistoryEntries + appendGlobalHistory round-trip...");
+  {
+    if (fs.existsSync(HISTORY_FILE)) fs.unlinkSync(HISTORY_FILE);
+    const m = new CrawlManager();
+    m.createCrawl("https://x.com", "Page X", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
+    const yNode = m.addNavigation("https://y.com", "Page Y", "choice");
+    m.appendCursor(yNode.id, "choice");
+
+    const extracted = extractHistoryEntries(m);
+    appendGlobalHistory(extracted);
+
+    const loaded = loadGlobalHistory();
+    assert(loaded.length === 2, `round-trip: 2 entries (got ${loaded.length})`);
+    assert(loaded[0].url === "https://x.com", "round-trip: first URL");
+    assert(loaded[1].url === "https://y.com", "round-trip: second URL");
+    assert(loaded[1].title === "Page Y", "round-trip: second title");
+  }
+  console.log();
+
+  console.log("extractHistoryEntries — cross-stash resolution...");
+  {
+    const m = new CrawlManager();
+    m.createCrawl("https://a.com", "Stashed A", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
+    m.pushStash();
+    m.createCrawl("https://b.com", "Active B", "goto");
+    m.appendCursor(m.currentNodeId!, "goto");
+
+    const extracted = extractHistoryEntries(m);
+    assert(extracted.length === 2, `2 entries across stash (got ${extracted.length})`);
+    assert(extracted[0].url === "https://a.com", "stashed entry url");
+    assert(extracted[1].url === "https://b.com", "active entry url");
+  }
+  console.log();
+
+  // Cleanup history test path
+  setHistoryPath(null);
 
   // ---------------------------------------------------------------
   // Cleanup

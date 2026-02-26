@@ -1,9 +1,11 @@
 import * as fs from "fs";
 import * as path from "path";
 import { ExtractedData } from "../llm/provider";
+import { ReachedBy } from "../crawl/tree";
 
 const CLM_DIR = process.env.CLM_DIR || path.join(process.env.HOME || "~", "clm");
 const CONFIG_PATH = path.join(CLM_DIR, "config.json");
+const HISTORY_PATH = path.join(CLM_DIR, "history.json");
 
 interface ClmConfig {
   homeUrl?: string;
@@ -72,4 +74,69 @@ export function saveSessionLog(
 
   fs.writeFileSync(filepath, lines.join("\n"));
   return filepath;
+}
+
+// ===================================================================
+// Global History (persistent across sessions)
+// ===================================================================
+
+export interface GlobalHistoryEntry {
+  url: string;
+  title: string;
+  timestamp: number;
+  reachedBy: ReachedBy;
+  crawlId: string;
+  crawlName: string;
+}
+
+interface GlobalHistory {
+  version: 1;
+  entries: GlobalHistoryEntry[];
+}
+
+const MAX_HISTORY_ENTRIES = 1000;
+
+/** Override for testing */
+let historyPathOverride: string | null = null;
+export function setHistoryPath(p: string | null): void {
+  historyPathOverride = p;
+}
+function getHistoryPath(): string {
+  return historyPathOverride || HISTORY_PATH;
+}
+
+export function loadGlobalHistory(): GlobalHistoryEntry[] {
+  const hp = getHistoryPath();
+  try {
+    if (fs.existsSync(hp)) {
+      const data = JSON.parse(fs.readFileSync(hp, "utf-8")) as GlobalHistory;
+      if (data.version === 1 && Array.isArray(data.entries)) {
+        return data.entries;
+      }
+    }
+  } catch { /* corrupt file — start fresh */ }
+  return [];
+}
+
+export function appendGlobalHistory(newEntries: GlobalHistoryEntry[]): void {
+  if (newEntries.length === 0) return;
+
+  const hp = getHistoryPath();
+  const existing = loadGlobalHistory();
+
+  // Dedup by timestamp — if the same timestamp already exists, skip it
+  const existingTimestamps = new Set(existing.map(e => e.timestamp));
+  const toAdd = newEntries.filter(e => !existingTimestamps.has(e.timestamp));
+  if (toAdd.length === 0) return;
+
+  const merged = [...existing, ...toAdd];
+
+  // Cap at MAX_HISTORY_ENTRIES, drop oldest
+  const capped = merged.length > MAX_HISTORY_ENTRIES
+    ? merged.slice(merged.length - MAX_HISTORY_ENTRIES)
+    : merged;
+
+  const history: GlobalHistory = { version: 1, entries: capped };
+  ensureDir(path.dirname(hp));
+  fs.writeFileSync(hp, JSON.stringify(history, null, 2));
 }

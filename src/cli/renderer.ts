@@ -215,7 +215,7 @@ export function help(): void {
   console.log(`  ${CYAN}/save${RESET}          Save data to disk`);
   console.log(`  ${CYAN}/url${RESET}           Show current URL`);
   console.log(`  ${CYAN}/stack${RESET}         Show navigation stack`);
-  console.log(`  ${CYAN}/history${RESET}       Show visit history (/history N to jump)`);
+  console.log(`  ${CYAN}/history${RESET}       Show visit history (/history N to jump, /history all)`);
   console.log(`  ${CYAN}/tree${RESET}          Show crawl navigation tree`);
   console.log(`  ${CYAN}/crawl${RESET}         Manage crawls (list, load, rename, end, info, done, pin, status)`);
   console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
@@ -492,6 +492,91 @@ export function historyList(entries: HistoryEntry[]): void {
       console.log(`         ${DIM}${truncated}${RESET}`);
     }
   }
+  console.log();
+}
+
+// ---------------------------------------------------------------
+// Persistent history display (cross-session)
+// ---------------------------------------------------------------
+
+export interface PersistentHistoryEntry {
+  title: string;
+  url: string;
+  reachedBy: string;
+  timestamp: number;
+  crawlName: string;
+}
+
+export interface PersistentHistoryOptions {
+  pastEntries: PersistentHistoryEntry[];
+  sessionEntries: HistoryEntry[];   // reuses HistoryEntry (has index, isCurrent)
+  totalPersisted: number;           // total count in history.json
+}
+
+export function persistentHistoryList(opts: PersistentHistoryOptions): void {
+  const { pastEntries, sessionEntries, totalPersisted } = opts;
+  const totalShown = pastEntries.length + sessionEntries.length;
+  const totalAll = totalPersisted + sessionEntries.length;
+
+  console.log();
+  console.log(`  ${BOLD}Visit history (${totalAll} entr${totalAll !== 1 ? "ies" : "y"})${RESET}`);
+  console.log();
+
+  // Past entries (view-only, no index numbers)
+  if (pastEntries.length > 0) {
+    const hiddenCount = totalPersisted - pastEntries.length;
+    if (hiddenCount > 0) {
+      console.log(`  ${DIM}... ${hiddenCount} earlier entr${hiddenCount !== 1 ? "ies" : "y"} (/history all to show)${RESET}`);
+    }
+
+    let lastCrawlName: string | undefined;
+    for (const entry of pastEntries) {
+      if (entry.crawlName && entry.crawlName !== lastCrawlName) {
+        if (lastCrawlName !== undefined) {
+          console.log(`  ${DIM}${"─".repeat(52)}${RESET}`);
+        }
+        console.log(`  ${DIM}▸ ${entry.crawlName}${RESET}`);
+        lastCrawlName = entry.crawlName;
+      }
+
+      const icon = reachedByIcon[entry.reachedBy] || "·";
+      const time = formatRelativeTime(entry.timestamp);
+      const titleVisible = entry.title;
+      const timeCol = 52;
+      const gap = Math.max(1, timeCol - titleVisible.length - 6);
+      const padding = " ".repeat(gap);
+
+      console.log(`       ${icon} ${DIM}${entry.title}${RESET}${padding}${DIM}${time}${RESET}`);
+    }
+  }
+
+  // Session separator
+  if (pastEntries.length > 0 && sessionEntries.length > 0) {
+    console.log(`  ${DIM}${"─".repeat(52)}${RESET}`);
+    console.log(`  ${DIM}▸ current session${RESET}`);
+  }
+
+  // Current-session entries (jumpable, with index numbers)
+  for (const entry of sessionEntries) {
+    const icon = reachedByIcon[entry.reachedBy] || "·";
+    const time = formatRelativeTime(entry.timestamp);
+    const prefix = entry.isCurrent ? `${CYAN}→${RESET}` : " ";
+    const titleStr = entry.isCurrent
+      ? `${BOLD}${WHITE}${entry.title}${RESET}`
+      : entry.title;
+
+    const titleVisible = entry.title;
+    const timeCol = 52;
+    const gap = Math.max(1, timeCol - titleVisible.length - 6);
+    const padding = " ".repeat(gap);
+
+    console.log(`  ${prefix} ${CYAN}[${entry.index}]${RESET} ${icon} ${titleStr}${padding}${DIM}${time}${RESET}`);
+  }
+
+  if (totalShown === 0) {
+    console.log(`  ${DIM}(no history yet)${RESET}`);
+  }
+
   console.log();
 }
 

@@ -13,13 +13,14 @@ import { isHNItemPage, extractHNComments, formatHNPageForLLM } from "../sites/hn
 import { formatGoal, addBreadcrumb, formatGoalWithCrawl } from "./goals";
 import * as render from "./renderer";
 import { saveData, saveSessionLog, loadConfig, saveConfig } from "../output/writer";
+import { appendGlobalHistory } from "../output/writer";
 import { CrawlManager, CrawlNode, ReachedBy, FullCursorEntry } from "../crawl/tree";
 import { saveCrawl, loadCrawl, listCrawls, peekCrawl } from "../crawl/persistence";
 import { deriveCrawlName } from "../crawl/namer";
 import { formatAncestorContext } from "../crawl/context";
 import { classifyNodeHeuristic, classifyCrawlHeuristic, formatCrawlForClassification, classifyCrawlLLM } from "../crawl/classify";
 import { pruneCrawl } from "../crawl/prune";
-import { saveSession, restoreManagerFromEnvelope, SessionEnvelope } from "../session/persistence";
+import { saveSession, restoreManagerFromEnvelope, SessionEnvelope, extractHistoryEntries } from "../session/persistence";
 import { executeChoice, ExecutionDeps } from "../auto/executor";
 import { runAuto, AutoResult } from "../auto/runner";
 import { SessionState, ReplContext, CommandHandler, NavigateOpts } from "./handler-types";
@@ -95,6 +96,7 @@ export class Repl {
   private abortController: AbortController | null = null;
   private crawlManager = new CrawlManager();
   private autoSaveTimer: ReturnType<typeof setInterval> | null = null;
+  private lastFlushedCursorIndex = 0;
 
   constructor(engine: BrowserEngine, llm: LLMProvider, userGoal: string, site: string) {
     this.engine = engine;
@@ -175,6 +177,7 @@ export class Repl {
     this.autoSaveTimer = setInterval(() => {
       if (this.crawlManager.activeCrawl) {
         try { this.saveSessionSidecar(); } catch { /* silent */ }
+        try { this.flushHistory(); } catch { /* silent */ }
       }
     }, 60_000);
 
@@ -1537,6 +1540,20 @@ export class Repl {
   }
 
   /**
+   * Flush new cursor entries to persistent global history.
+   * Only appends entries added since the last flush (idempotent).
+   */
+  private flushHistory(): void {
+    const cursor = this.crawlManager.cursorHistory;
+    if (cursor.length <= this.lastFlushedCursorIndex) return;
+    const newEntries = extractHistoryEntries(this.crawlManager, this.lastFlushedCursorIndex);
+    if (newEntries.length > 0) {
+      appendGlobalHistory(newEntries);
+    }
+    this.lastFlushedCursorIndex = cursor.length;
+  }
+
+  /**
    * Expose crawlManager for session resume (used by index.ts).
    */
   getCrawlManager(): CrawlManager {
@@ -1548,6 +1565,9 @@ export class Repl {
    */
   async resumeSession(envelope: SessionEnvelope): Promise<void> {
     restoreManagerFromEnvelope(envelope, this.crawlManager);
+
+    // Mark existing cursor entries as already flushed (previous session wrote them)
+    this.lastFlushedCursorIndex = this.crawlManager.cursorHistory.length;
 
     // Restore REPL state
     this.state.currentUrl = envelope.repl.currentUrl;
@@ -1721,6 +1741,7 @@ export class Repl {
     }
     this.forceSave();
     this.saveSessionSidecar();
+    this.flushHistory();
     // Save lastSessionId to config
     if (this.crawlManager.activeCrawl) {
       const config = loadConfig();
