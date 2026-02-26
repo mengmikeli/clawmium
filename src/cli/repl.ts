@@ -17,6 +17,8 @@ import { CrawlManager, CrawlNode, ReachedBy, FullCursorEntry } from "../crawl/tr
 import { saveCrawl, loadCrawl, listCrawls, peekCrawl } from "../crawl/persistence";
 import { deriveCrawlName } from "../crawl/namer";
 import { formatAncestorContext } from "../crawl/context";
+import { classifyNodeHeuristic, classifyCrawlHeuristic, formatCrawlForClassification, classifyCrawlLLM } from "../crawl/classify";
+import { pruneCrawl } from "../crawl/prune";
 import { saveSession, restoreManagerFromEnvelope, SessionEnvelope } from "../session/persistence";
 import { executeChoice, ExecutionDeps } from "../auto/executor";
 import { runAuto, AutoResult } from "../auto/runner";
@@ -310,13 +312,19 @@ export class Repl {
     if (opts?.preNavigate) {
       await opts.preNavigate();
     }
+    let httpStatus: number | undefined;
     try {
-      await this.nav.goto(url);
+      const result = await this.nav.goto(url);
+      httpStatus = result.httpStatus;
     } catch (err) {
       render.error((err as Error).message);
       return false;
     }
     this.state.currentUrl = url;
+    // Store HTTP status on the node after navigation tracking
+    if (httpStatus && this.crawlManager.currentNodeId) {
+      this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, { httpStatus });
+    }
     await this.engine.getPage().waitForTimeout(opts?.settleMs ?? 500);
     await this.processCurrentPage();
     return true;
@@ -1175,6 +1183,13 @@ export class Repl {
     meta.interpretation = interpretation;
     meta.goalContext = { ...this.state.goalContext, breadcrumb: [...this.state.goalContext.breadcrumb] };
     this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, meta);
+
+    // Classify the current node
+    const node = this.crawlManager.getNode(this.crawlManager.currentNodeId);
+    if (node) {
+      const classification = classifyNodeHeuristic(node, this.crawlManager.nodes, this.crawlManager.cursorHistory);
+      this.crawlManager.setNodeMetadata(this.crawlManager.currentNodeId, { classification });
+    }
   }
 
   /**
@@ -1683,6 +1698,47 @@ export class Repl {
     if (this.autoSaveTimer) {
       clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
+    }
+    // Classify the active crawl before saving
+    if (this.crawlManager.activeCrawl) {
+      const sessionDurationMs = Date.now() - this.crawlManager.activeCrawl.created;
+      const result = classifyCrawlHeuristic({
+        crawl: this.crawlManager.activeCrawl,
+        nodes: this.crawlManager.nodes,
+        goalContext: this.state.goalContext,
+        sessionDurationMs,
+      });
+      this.crawlManager.setCrawlMeta({
+        lifecycle: result.lifecycle,
+        lifecycleReason: result.lifecycleReason,
+        lifecycleUpdatedAt: Date.now(),
+        tags: result.tags,
+        noise: result.noise,
+        sensitive: result.sensitive,
+      });
+      // Auto-prune dead branches
+      const pruned = pruneCrawl(this.crawlManager);
+      if (pruned.prunedCount > 0 && this.state.debugEnabled) {
+        render.status(`pruned ${pruned.prunedCount} dead node(s)`);
+      }
+      // LLM reflection for low-confidence classifications
+      if (result.confidence < 0.7) {
+        try {
+          render.progress("reflecting on session...");
+          const crawlSummary = formatCrawlForClassification(this.crawlManager, this.state.goalContext);
+          const llmResult = await classifyCrawlLLM(this.llm, crawlSummary, this.state.goalContext, result);
+          this.crawlManager.setCrawlMeta({
+            lifecycle: llmResult.lifecycle,
+            lifecycleReason: llmResult.lifecycleReason,
+            lifecycleUpdatedAt: Date.now(),
+            tags: llmResult.tags,
+          });
+          render.progressDone();
+        } catch {
+          render.progressDone();
+          // LLM reflection failed — continue with heuristic result
+        }
+      }
     }
     this.forceSave();
     this.saveSessionSidecar();

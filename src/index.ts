@@ -6,8 +6,12 @@ import { AnthropicProvider } from "./llm/anthropic";
 import { OpenAIProvider } from "./llm/openai";
 import { Repl } from "./cli/repl";
 import * as render from "./cli/renderer";
-import { loadConfig } from "./output/writer";
-import { findLastSession, loadSession, SessionEnvelope } from "./session/persistence";
+import { loadSession } from "./session/persistence";
+import { buildHomepage, renderHomepage, homepageTotal, homepageCrawlAt } from "./cli/homepage";
+import { listCrawlsWithMeta, loadCrawl, saveCrawl } from "./crawl/persistence";
+import { classifyCrawlHeuristic, formatCrawlForClassification, classifyCrawlLLM } from "./crawl/classify";
+import { CrawlManager } from "./crawl/tree";
+import { saveSession } from "./session/persistence";
 
 function createProvider(): { provider: LLMProvider; name: string } {
   const providerName = process.env.LLM_PROVIDER || "anthropic";
@@ -34,22 +38,6 @@ function createProvider(): { provider: LLMProvider; name: string } {
   process.exit(1);
 }
 
-/**
- * Prompt the user for y/n using raw readline (before REPL starts).
- */
-function askYesNo(question: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase().startsWith("y"));
-    });
-  });
-}
-
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -70,37 +58,95 @@ async function main() {
     const repl = new Repl(engine, provider, `browsing ${site}`, site);
     await repl.start(url);
   } else {
-    // clm (no args) — try to resume previous session
+    // clm (no args) — show homepage dashboard
     if (!hasNewFlag) {
-      // Check for last session: try config.lastSessionId first, then scan
-      const config = loadConfig();
-      let envelope: SessionEnvelope | null = null;
-
-      if (config.lastSessionId) {
-        envelope = loadSession(config.lastSessionId);
+      // Startup sweep: re-classify stale open crawls (up to 3)
+      try {
+        const allPeeks = listCrawlsWithMeta();
+        const staleOpen = allPeeks.filter(
+          (p) => (!p.lifecycle || p.lifecycle === "open") && p.lastAccessed && Date.now() - p.lastAccessed > 24 * 3600000,
+        );
+        for (const peek of staleOpen.slice(0, 3)) {
+          const m = new CrawlManager();
+          if (loadCrawl(peek.id, m)) {
+            const sessionDurationMs = (m.activeCrawl?.lastAccessed || 0) - (m.activeCrawl?.created || 0);
+            const result = classifyCrawlHeuristic({
+              crawl: m.activeCrawl!,
+              nodes: m.nodes,
+              sessionDurationMs: Math.max(0, sessionDurationMs),
+            });
+            m.setCrawlMeta({
+              lifecycle: result.lifecycle,
+              lifecycleReason: result.lifecycleReason,
+              lifecycleUpdatedAt: Date.now(),
+              tags: result.tags,
+              noise: result.noise,
+              sensitive: result.sensitive,
+            });
+            saveCrawl(m);
+            saveSession({
+              manager: m,
+              currentUrl: m.currentNodeId ? m.getNode(m.currentNodeId)?.url || "" : "",
+              site: "",
+              homeUrl: "",
+              goalContext: { baseGoal: "", activeIntent: "", breadcrumb: [] },
+              history: [],
+              log: [],
+            });
+          }
+        }
+      } catch {
+        // Sweep failed — continue without it
       }
-      if (!envelope) {
-        const found = findLastSession(7);
-        if (found) envelope = found.envelope;
-      }
 
-      if (envelope) {
-        const crawlName = envelope.crawl.name || "unnamed";
-        const savedAgo = Math.round((Date.now() - envelope.savedAt) / 60000);
-        const timeStr = savedAgo < 60
-          ? `${savedAgo}m ago`
-          : savedAgo < 1440
-            ? `${Math.round(savedAgo / 60)}h ago`
-            : `${Math.round(savedAgo / 1440)}d ago`;
+      const homepage = buildHomepage();
+      const total = homepageTotal(homepage);
 
-        render.status(`found previous session: "${crawlName}" (saved ${timeStr})`);
-        const resume = await askYesNo("  Resume previous session? (y/n) ");
+      if (total > 0) {
+        renderHomepage(homepage);
 
-        if (resume) {
-          const repl = new Repl(engine, provider, "", "");
-          await repl.resumeSession(envelope);
+        // Wait for user input: number to resume, /goto for new, empty for blank start
+        const answer = await new Promise<string>((resolve) => {
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
+          rl.question(`${"\x1b[36m"}> ${"\x1b[0m"}`, (ans) => {
+            rl.close();
+            resolve(ans.trim());
+          });
+        });
+
+        // Number → resume that crawl's session
+        const num = parseInt(answer, 10);
+        if (!isNaN(num) && num >= 1) {
+          const picked = homepageCrawlAt(homepage, num);
+          if (picked) {
+            const envelope = loadSession(picked.id);
+            if (envelope) {
+              const repl = new Repl(engine, provider, "", "");
+              await repl.resumeSession(envelope);
+              return;
+            }
+            render.warn(`could not load session for "${picked.name}" — starting fresh`);
+          } else {
+            render.warn(`no crawl at index ${num}`);
+          }
+        }
+
+        // /goto <url> → pass through to normal startup with URL
+        if (answer.startsWith("/goto ")) {
+          let url = answer.slice(6).trim();
+          if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(url)) {
+            url = `https://${url}`;
+          }
+          const site = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
+          const repl = new Repl(engine, provider, `browsing ${site}`, site);
+          await repl.start(url);
           return;
         }
+
+        // Empty or unrecognized → fall through to blank start
       }
     }
 

@@ -369,7 +369,7 @@ async function main() {
 
     const envelope = loadSession(crawl.id);
     assert(envelope !== null, "loadSession returns envelope");
-    assert(envelope!.version === 3, "version is 3");
+    assert(envelope!.version === 4, "version is 4");
     assert(envelope!.crawl.id === crawl.id, "crawl ID matches");
     assert(envelope!.repl.currentUrl === "https://test.com", "currentUrl matches");
   }
@@ -552,7 +552,7 @@ async function main() {
     // We already have sessions saved above
     const result = findLastSession(7);
     assert(result !== null, "findLastSession returns non-null");
-    assert(result!.envelope.version === 2 || result!.envelope.version === 3, "envelope is valid (v2 or v3)");
+    assert(result!.envelope.version === 2 || result!.envelope.version === 3 || result!.envelope.version === 4, "envelope is valid (v2, v3, or v4)");
   }
   console.log();
 
@@ -791,7 +791,7 @@ async function main() {
 
     assert(filepath !== null, "saveSession returns filepath with stash");
     const raw = JSON.parse(fs.readFileSync(filepath!, "utf-8"));
-    assert(raw.version === 3, "envelope is version 3");
+    assert(raw.version === 4, "envelope is version 4");
     assert(Array.isArray(raw.stash), "stash is array");
     assert(raw.stash.length === 1, "stash has 1 entry");
     assert(raw.stash[0].nodes.length === 1, "stashed crawl has 1 node");

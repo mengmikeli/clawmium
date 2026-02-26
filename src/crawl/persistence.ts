@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { CrawlManager, CrawlNode, Crawl, ReachedBy } from "./tree";
+import { CrawlLifecycle, CrawlTag } from "./classify";
 import { loadSession, restoreManagerFromEnvelope } from "../session/persistence";
 
 // ===================================================================
@@ -35,6 +36,10 @@ export interface CrawlPeek {
   created: number;
   rootUrl: string;
   nodeCount: number;
+  lifecycle?: CrawlLifecycle;
+  tags?: CrawlTag[];
+  pinned?: boolean;
+  lastAccessed?: number;
 }
 
 /**
@@ -54,6 +59,10 @@ export function peekCrawl(crawlId: string): CrawlPeek | null {
     const createdMatch = content.match(/\*\*Created:\*\* (.+)$/m);
     const rootMatch = content.match(/\*\*Root:\*\* (.+)$/m);
     const crawlIdMatch = content.match(/\*\*Crawl ID:\*\* (.+)$/m);
+    const lastAccessedMatch = content.match(/\*\*Last Accessed:\*\* (.+)$/m);
+    const lifecycleMatch = content.match(/\*\*Lifecycle:\*\* (.+)$/m);
+    const tagsMatch = content.match(/\*\*Tags:\*\* (.+)$/m);
+    const pinnedMatch = content.match(/\*\*Pinned:\*\* (.+)$/m);
 
     if (!nameMatch || !createdMatch || !rootMatch || !crawlIdMatch) return null;
 
@@ -73,6 +82,10 @@ export function peekCrawl(crawlId: string): CrawlPeek | null {
       created: new Date(createdMatch[1].trim()).getTime(),
       rootUrl: rootMatch[1].trim(),
       nodeCount,
+      lifecycle: lifecycleMatch ? lifecycleMatch[1].trim() as CrawlLifecycle : undefined,
+      tags: tagsMatch ? tagsMatch[1].trim().split(",").map((t) => t.trim()).filter(Boolean) as CrawlTag[] : undefined,
+      pinned: pinnedMatch ? pinnedMatch[1].trim() === "true" : undefined,
+      lastAccessed: lastAccessedMatch ? new Date(lastAccessedMatch[1].trim()).getTime() : undefined,
     };
   } catch {
     return null;
@@ -97,6 +110,15 @@ export function saveCrawl(manager: CrawlManager, sessionLog?: Array<{ role: stri
   lines.push(`**Root:** ${rootNode.url}`);
   lines.push(`**Crawl ID:** ${crawl.id}`);
   lines.push(`**Root ID:** ${crawl.rootId}`);
+  if (crawl.meta) {
+    lines.push(`**Lifecycle:** ${crawl.meta.lifecycle}`);
+    if (crawl.meta.tags.length > 0) {
+      lines.push(`**Tags:** ${crawl.meta.tags.join(", ")}`);
+    }
+    if (crawl.meta.pinned) {
+      lines.push(`**Pinned:** true`);
+    }
+  }
   lines.push("");
 
   // Tree section
@@ -291,4 +313,18 @@ export function listCrawls(): string[] {
     .readdirSync(dir)
     .filter((f) => f.endsWith(".md"))
     .map((f) => f.replace(".md", ""));
+}
+
+/**
+ * List all crawls with full peek metadata, sorted by lastAccessed descending.
+ */
+export function listCrawlsWithMeta(): CrawlPeek[] {
+  const ids = listCrawls();
+  const results: CrawlPeek[] = [];
+  for (const id of ids) {
+    const peek = peekCrawl(id);
+    if (peek) results.push(peek);
+  }
+  results.sort((a, b) => (b.lastAccessed || b.created) - (a.lastAccessed || a.created));
+  return results;
 }

@@ -20,6 +20,11 @@
     "test:repl": "tsx src/__test__repl.ts",
     "test:aria": "tsx src/__test__aria.ts",
     "test:markdown": "tsx src/browser/__test__markdown.ts",
+    "test:classify": "tsx src/__test__classify.ts",
+    "test:homepage": "tsx src/__test__homepage.ts",
+    "test:prune": "tsx src/__test__prune.ts",
+    "test:merge": "tsx src/__test__merge.ts",
+    "test:classify-llm": "tsx src/__test__crawl_classify_llm.ts",
     "clm": "tsx src/index.ts"
   },
   "keywords": [],

@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { CrawlManager, CrawlNode, Crawl, CursorEntry, ReachedBy, StashedCrawl } from "../crawl/tree";
 import { PageInterpretation, GoalContext } from "../llm/provider";
+import { CrawlMeta } from "../crawl/classify";
 
 // ===================================================================
 // Types
@@ -20,6 +21,8 @@ export interface SerializedCrawlNode {
     conversationSnippets?: string[];
     interpretation?: PageInterpretation;
     goalContext?: GoalContext;
+    classification?: import("../crawl/classify").NodeClassification;
+    httpStatus?: number;
   };
 }
 
@@ -36,7 +39,7 @@ export interface SerializedStashedCrawl {
 }
 
 export interface SessionEnvelope {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   savedAt: number;
   crawl: {
     id: string;
@@ -48,6 +51,7 @@ export interface SessionEnvelope {
     nodes: SerializedCrawlNode[];
     cursorHistory: CursorEntry[];
     cursorIndex: number;
+    meta?: CrawlMeta;
   };
   stash?: SerializedStashedCrawl[];
   repl: {
@@ -171,7 +175,7 @@ export function saveSession(opts: SaveSessionOptions): string | null {
   ensureDir(dir);
 
   const envelope: SessionEnvelope = {
-    version: 3,
+    version: 4,
     savedAt: Date.now(),
     crawl: {
       id: manager.activeCrawl.id,
@@ -183,6 +187,7 @@ export function saveSession(opts: SaveSessionOptions): string | null {
       nodes: serializeNodes(manager.nodes),
       cursorHistory: manager.cursorHistory.map(e => ({ ...e })),
       cursorIndex: manager.cursorIndex,
+      meta: manager.activeCrawl.meta,
     },
     stash: manager.stash.map(s => ({
       id: s.activeCrawl.id,
@@ -225,9 +230,11 @@ export function loadSession(crawlId: string): SessionEnvelope | null {
   try {
     const content = fs.readFileSync(filepath, "utf-8");
     const envelope = JSON.parse(content) as SessionEnvelope;
-    if (envelope.version !== 2 && envelope.version !== 3) return null;
+    if (envelope.version !== 2 && envelope.version !== 3 && envelope.version !== 4) return null;
     // Backfill stash for v2 envelopes
     if (!envelope.stash) envelope.stash = [];
+    // Backfill meta for v2/v3 envelopes
+    if (!envelope.crawl.meta) envelope.crawl.meta = undefined;
     return envelope;
   } catch {
     return null;
@@ -244,6 +251,7 @@ export function restoreManagerFromEnvelope(envelope: SessionEnvelope, manager: C
     created: envelope.crawl.created,
     lastAccessed: envelope.crawl.lastAccessed,
     rootId: envelope.crawl.rootId,
+    meta: envelope.crawl.meta,
   };
 
   manager.activeCrawl = crawl;

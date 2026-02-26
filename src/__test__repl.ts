@@ -104,6 +104,7 @@ function makeMockNav(mockPage: any): any {
       if (gotoError) { const err = gotoError; gotoError = null; throw err; }
       lastGotoUrl = url;
       mockPage._setUrl(url);
+      return {};
     },
     currentUrl: () => mockPage._url(),
     extractContent: async () => ({

@@ -18,10 +18,14 @@ export interface AriaSnapshot {
   timestamp: number;
 }
 
+export interface GotoResult {
+  httpStatus?: number;
+}
+
 export class PageNavigator {
   constructor(private page: Page) {}
 
-  async goto(url: string): Promise<void> {
+  async goto(url: string): Promise<GotoResult> {
     let response: Awaited<ReturnType<Page["goto"]>>;
     try {
       response = await this.page.goto(url, { waitUntil: "networkidle", timeout: 15_000 });
@@ -37,7 +41,7 @@ export class PageNavigator {
           throw new Error(`could not reach ${url} — site may be down or URL may be wrong`);
         }
         // Page may have already navigated; continue with whatever loaded
-        return;
+        return {};
       }
     }
 
@@ -46,6 +50,7 @@ export class PageNavigator {
     if (status >= 400) {
       throw new Error(`${url} returned HTTP ${status}`);
     }
+    return { httpStatus: status || undefined };
   }
 
   async extractContent(): Promise<PageContent> {

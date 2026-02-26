@@ -98,3 +98,29 @@ Rules:
 - Format dates in human-readable form (e.g., "March 1, 2026")
 - Include the full raw data unchanged for reference
 - If the data is empty, contains only a URL/title with no actual content, or is clearly not real extracted data, set title to "No data available" and fields to an empty object. Do NOT fabricate or guess data.`;
+
+export const CLASSIFY_CRAWL_SYSTEM_PROMPT = `You are a browsing session analyst. Given a crawl tree (pages visited, their summaries) and the user's goal, classify the session.
+
+Respond with ONLY valid JSON matching this schema:
+{
+  "lifecycle": "open" | "done" | "overdue" | "stale",
+  "lifecycleReason": "Brief reason for the lifecycle state",
+  "tags": ["research" | "lookup" | "task" | "exploration" | "reference" | "sensitive"],
+  "suggestMerge": false,
+  "suggestPrune": false
+}
+
+Rules:
+- "done": The user appears to have found what they were looking for (data extracted, confirmation reached, goal satisfied).
+- "overdue": The user started a task but seems to have abandoned it without completion.
+- "stale": The session is old and likely no longer relevant.
+- "open": The session is still in progress or the state is unclear.
+- Tags:
+  - "lookup": Quick check, few pages, short duration.
+  - "task": Goal-directed browsing with a specific objective.
+  - "research": Broad exploration across many pages and depth.
+  - "exploration": Casual browsing without specific goal.
+  - "reference": Pages bookmarked or revisited for reference.
+  - "sensitive": Contains login, billing, or payment pages.
+- suggestMerge: true if this crawl overlaps significantly with the goal/domain and could be merged with a similar crawl.
+- suggestPrune: true if the tree has many dead-end or error pages that should be cleaned up.`;

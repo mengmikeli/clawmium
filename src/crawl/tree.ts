@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import { PageInterpretation, GoalContext } from "../llm/provider";
+import { CrawlMeta, NodeClassification } from "./classify";
 
 // ===================================================================
 // Types
@@ -20,6 +21,8 @@ export interface CrawlNode {
     conversationSnippets?: string[];
     interpretation?: PageInterpretation;
     goalContext?: GoalContext;
+    classification?: NodeClassification;
+    httpStatus?: number;
   };
 }
 
@@ -29,6 +32,7 @@ export interface Crawl {
   name: string;
   created: number;
   lastAccessed: number;
+  meta?: CrawlMeta;
 }
 
 export interface CursorEntry {
@@ -301,7 +305,7 @@ export class CrawlManager {
   // Metadata helpers
   // ---------------------------------------------------------------
 
-  setNodeMetadata(nodeId: string, metadata: Partial<{ summary: string; conversationSnippets: string[]; interpretation: PageInterpretation; goalContext: GoalContext }>): void {
+  setNodeMetadata(nodeId: string, metadata: Partial<{ summary: string; conversationSnippets: string[]; interpretation: PageInterpretation; goalContext: GoalContext; classification: NodeClassification; httpStatus: number }>): void {
     const node = this.nodes.get(nodeId);
     if (!node) return;
     if (!node.metadata) node.metadata = {};
@@ -309,6 +313,8 @@ export class CrawlManager {
     if (metadata.conversationSnippets !== undefined) node.metadata.conversationSnippets = metadata.conversationSnippets;
     if (metadata.interpretation !== undefined) node.metadata.interpretation = metadata.interpretation;
     if (metadata.goalContext !== undefined) node.metadata.goalContext = metadata.goalContext;
+    if (metadata.classification !== undefined) node.metadata.classification = metadata.classification;
+    if (metadata.httpStatus !== undefined) node.metadata.httpStatus = metadata.httpStatus;
   }
 
   appendConversationSnippet(nodeId: string, snippet: string, maxSnippets = 5): void {
@@ -404,6 +410,96 @@ export class CrawlManager {
   resetCursor(): void {
     this.cursorHistory = [];
     this.cursorIndex = -1;
+  }
+
+  // ---------------------------------------------------------------
+  // Tree query helpers
+  // ---------------------------------------------------------------
+
+  getLeafNodes(): CrawlNode[] {
+    const leaves: CrawlNode[] = [];
+    for (const node of this.nodes.values()) {
+      if (node.children.length === 0) leaves.push(node);
+    }
+    return leaves;
+  }
+
+  findNodes(predicate: (n: CrawlNode) => boolean): CrawlNode[] {
+    const result: CrawlNode[] = [];
+    for (const node of this.nodes.values()) {
+      if (predicate(node)) result.push(node);
+    }
+    return result;
+  }
+
+  getNodeStats(): { total: number; live: number; dead: number; pruned: number } {
+    let live = 0, dead = 0, pruned = 0;
+    for (const node of this.nodes.values()) {
+      const status = node.metadata?.classification?.status;
+      if (status === "dead") dead++;
+      else if (status === "pruned") pruned++;
+      else live++;
+    }
+    return { total: this.nodes.size, live, dead, pruned };
+  }
+
+  removeSubtree(nodeId: string): string[] {
+    const node = this.nodes.get(nodeId);
+    if (!node) return [];
+    // Refuse to remove root
+    if (this.activeCrawl && nodeId === this.activeCrawl.rootId) return [];
+
+    const ids = this.getSubtreeIds(nodeId);
+
+    // Detach from parent
+    if (node.parentId) {
+      const parent = this.nodes.get(node.parentId);
+      if (parent) {
+        parent.children = parent.children.filter((id) => id !== nodeId);
+      }
+    }
+
+    // Remove all nodes in subtree
+    for (const id of ids) {
+      const n = this.nodes.get(id);
+      if (n) {
+        this.nodeIndex.delete(n.url);
+        this.nodes.delete(id);
+      }
+    }
+
+    return ids;
+  }
+
+  setCrawlMeta(meta: Partial<CrawlMeta>): void {
+    if (!this.activeCrawl) return;
+    if (!this.activeCrawl.meta) {
+      this.activeCrawl.meta = {
+        lifecycle: "open",
+        lifecycleUpdatedAt: Date.now(),
+        tags: [],
+        pinned: false,
+      };
+    }
+    if (meta.lifecycle !== undefined) this.activeCrawl.meta.lifecycle = meta.lifecycle;
+    if (meta.lifecycleReason !== undefined) this.activeCrawl.meta.lifecycleReason = meta.lifecycleReason;
+    if (meta.lifecycleUpdatedAt !== undefined) this.activeCrawl.meta.lifecycleUpdatedAt = meta.lifecycleUpdatedAt;
+    if (meta.tags !== undefined) this.activeCrawl.meta.tags = meta.tags;
+    if (meta.pinned !== undefined) this.activeCrawl.meta.pinned = meta.pinned;
+    if (meta.noise !== undefined) this.activeCrawl.meta.noise = meta.noise;
+    if (meta.sensitive !== undefined) this.activeCrawl.meta.sensitive = meta.sensitive;
+    if (meta.mergedFrom !== undefined) this.activeCrawl.meta.mergedFrom = meta.mergedFrom;
+    if (meta.mergedInto !== undefined) this.activeCrawl.meta.mergedInto = meta.mergedInto;
+  }
+
+  getCrawlMeta(): CrawlMeta {
+    if (this.activeCrawl?.meta) return this.activeCrawl.meta;
+    return {
+      lifecycle: "open",
+      lifecycleUpdatedAt: Date.now(),
+      tags: [],
+      pinned: false,
+    };
   }
 
   // ---------------------------------------------------------------
@@ -545,7 +641,7 @@ export class CrawlManager {
     return subtreeIds.includes(newParentId);
   }
 
-  private getSubtreeIds(rootId: string): string[] {
+  getSubtreeIds(rootId: string): string[] {
     const ids: string[] = [];
     const queue = [rootId];
     while (queue.length > 0) {

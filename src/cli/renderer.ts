@@ -217,7 +217,7 @@ export function help(): void {
   console.log(`  ${CYAN}/stack${RESET}         Show navigation stack`);
   console.log(`  ${CYAN}/history${RESET}       Show visit history (/history N to jump)`);
   console.log(`  ${CYAN}/tree${RESET}          Show crawl navigation tree`);
-  console.log(`  ${CYAN}/crawl${RESET}         Manage crawls (list, load, rename, end, info)`);
+  console.log(`  ${CYAN}/crawl${RESET}         Manage crawls (list, load, rename, end, info, done, pin, status)`);
   console.log(`  ${CYAN}/clear${RESET}         Reset state (repl, crawl, browser, all)`);
   console.log(`  ${CYAN}/auto <goal>${RESET}   Agent drives browser toward a goal`);
   console.log(`  ${CYAN}/debug${RESET}          Toggle debug output`);
@@ -559,6 +559,24 @@ export function stashIndicator(depth: number, names: string[]): void {
   }
   console.log(`  ${DIM}(/back at start of crawl pops the stash)${RESET}`);
   console.log();
+}
+
+// ---------------------------------------------------------------
+// Crawl card (for homepage + crawl status)
+// ---------------------------------------------------------------
+
+export function crawlCard(fields: Record<string, string>): void {
+  const entries = Object.entries(fields);
+  const maxKeyLen = Math.max(...entries.map(([k]) => k.length));
+  const maxValLen = Math.max(...entries.map(([, v]) => v.length));
+  const innerWidth = Math.max(maxKeyLen + maxValLen + 4, 36);
+
+  console.log(`  ┌${"─".repeat(innerWidth + 2)}┐`);
+  for (const [key, value] of entries) {
+    const padding = " ".repeat(Math.max(0, innerWidth - key.length - value.length - 4));
+    console.log(`  │ ${BOLD}${key}:${RESET}  ${value}${padding} │`);
+  }
+  console.log(`  └${"─".repeat(innerWidth + 2)}┘`);
 }
 
 // ---------------------------------------------------------------

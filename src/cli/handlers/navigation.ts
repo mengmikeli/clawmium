@@ -2,6 +2,7 @@ import { ReplContext, HandlerResult } from "../handler-types";
 import * as render from "../renderer";
 import { saveConfig } from "../../output/writer";
 import { saveCrawl } from "../../crawl/persistence";
+import { buildHomepage, renderHomepage, homepageTotal } from "../homepage";
 
 // ===================================================================
 // /show
@@ -180,7 +181,14 @@ export async function handleHome(ctx: ReplContext, arg: string): Promise<Handler
     ctx.logCommand("/home");
     return;
   }
-  // No home URL set — prompt user
+  // No home URL set — show homepage dashboard if crawls exist
+  const homepage = buildHomepage();
+  if (homepageTotal(homepage) > 0) {
+    renderHomepage(homepage);
+    ctx.logCommand("/home");
+    return;
+  }
+  // No crawls either — prompt user to set home URL
   const answer = await new Promise<string>((resolve) => {
     ctx.rl.question("  enter home URL (or 'cancel'): ", resolve);
   });

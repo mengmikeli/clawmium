@@ -1,7 +1,10 @@
 import { ReplContext } from "../handler-types";
 import * as render from "../renderer";
-import { FullCursorEntry } from "../../crawl/tree";
-import { listCrawls, peekCrawl, loadCrawl, saveCrawl } from "../../crawl/persistence";
+import { FullCursorEntry, CrawlManager } from "../../crawl/tree";
+import { listCrawls, peekCrawl, loadCrawl, saveCrawl, listCrawlsWithMeta } from "../../crawl/persistence";
+import { CrawlLifecycle, CrawlTag } from "../../crawl/classify";
+import { pruneCrawl } from "../../crawl/prune";
+import { findMergeCandidates, graftCrawl } from "../../crawl/merge";
 
 // ANSI color helpers
 const RESET = "\x1b[0m";
@@ -248,6 +251,154 @@ export async function handleCrawl(ctx: ReplContext, arg: string, parts: string[]
       return;
     }
 
+    case "merge": {
+      if (!ctx.crawlManager.activeCrawl) {
+        render.warn("no active crawl");
+        return;
+      }
+      const allPeeks = listCrawlsWithMeta();
+      const candidates = findMergeCandidates(
+        ctx.crawlManager.activeCrawl.id,
+        allPeeks,
+        ctx.crawlManager.nodes,
+        ctx.state.goalContext,
+      );
+
+      if (candidates.length === 0) {
+        render.status("no merge candidates found");
+        ctx.logCommand("/crawl merge");
+        return;
+      }
+
+      console.log();
+      console.log(`  ${BOLD}Merge candidates:${RESET}`);
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        const pct = Math.round(c.similarity * 100);
+        console.log(`  ${CYAN}[${i + 1}]${RESET} ${c.crawlName} (${pct}% — ${c.reason})`);
+      }
+      console.log();
+
+      let pickNum = parseInt(subArg, 10);
+      if (isNaN(pickNum)) {
+        const answer = await new Promise<string>((resolve) => {
+          ctx.rl.question("  pick a candidate (or 'cancel'): ", resolve);
+        });
+        pickNum = parseInt(answer.trim(), 10);
+        if (isNaN(pickNum)) {
+          render.status("cancelled");
+          return;
+        }
+      }
+
+      const picked = candidates[pickNum - 1];
+      if (!picked) {
+        render.error(`no candidate at index ${pickNum}`);
+        return;
+      }
+
+      const confirmed = await ctx.confirmAction(`merge "${picked.crawlName}" into active crawl?`);
+      if (!confirmed) {
+        render.status("cancelled");
+        return;
+      }
+
+      // Load source crawl into temp manager
+      const sourceManager = new CrawlManager();
+      const loaded = loadCrawl(picked.crawlId, sourceManager);
+      if (!loaded) {
+        render.error("failed to load source crawl");
+        return;
+      }
+
+      const result = graftCrawl(ctx.crawlManager, sourceManager);
+      if (result.graftedNodeCount > 0) {
+        render.success(`grafted ${result.graftedNodeCount} node(s) from "${picked.crawlName}"`);
+        // Mark source as merged
+        sourceManager.setCrawlMeta({ mergedInto: ctx.crawlManager.activeCrawl!.id });
+        saveCrawl(sourceManager);
+      } else {
+        render.warn("no new nodes grafted (all URLs already in tree)");
+      }
+      ctx.logCommand("/crawl merge");
+      return;
+    }
+
+    case "prune": {
+      if (!ctx.crawlManager.activeCrawl) {
+        render.warn("no active crawl");
+        return;
+      }
+      const isDryRun = subArg.includes("--dry-run");
+      const result = pruneCrawl(ctx.crawlManager, { dryRun: isDryRun });
+      if (result.prunedCount === 0) {
+        render.status("no dead branches to prune");
+      } else if (isDryRun) {
+        render.status(`would prune ${result.prunedCount} node(s):`);
+        for (const reason of result.reasons) {
+          console.log(`    ${reason}`);
+        }
+      } else {
+        render.success(`pruned ${result.prunedCount} dead node(s)`);
+        for (const reason of result.reasons) {
+          console.log(`    ${reason}`);
+        }
+      }
+      ctx.logCommand(`/crawl prune${isDryRun ? " --dry-run" : ""}`);
+      return;
+    }
+
+    case "done": {
+      if (!ctx.crawlManager.activeCrawl) {
+        render.warn("no active crawl");
+        return;
+      }
+      const reason = subArg || "marked done by user";
+      ctx.crawlManager.setCrawlMeta({
+        lifecycle: "done" as CrawlLifecycle,
+        lifecycleReason: reason,
+        lifecycleUpdatedAt: Date.now(),
+      });
+      render.success(`crawl marked as done: "${reason}"`);
+      ctx.logCommand(`/crawl done ${subArg}`);
+      return;
+    }
+
+    case "pin": {
+      if (!ctx.crawlManager.activeCrawl) {
+        render.warn("no active crawl");
+        return;
+      }
+      const current = ctx.crawlManager.getCrawlMeta();
+      ctx.crawlManager.setCrawlMeta({ pinned: !current.pinned });
+      render.success(`crawl ${current.pinned ? "unpinned" : "pinned"}`);
+      ctx.logCommand("/crawl pin");
+      return;
+    }
+
+    case "status": {
+      if (!ctx.crawlManager.activeCrawl) {
+        render.warn("no active crawl");
+        return;
+      }
+      const meta = ctx.crawlManager.getCrawlMeta();
+      const stats = ctx.crawlManager.getNodeStats();
+      const fields: Record<string, string> = {
+        Lifecycle: meta.lifecycle,
+        Tags: meta.tags.length > 0 ? meta.tags.join(", ") : "(none)",
+        Pinned: meta.pinned ? "yes" : "no",
+        Sensitive: meta.sensitive ? "yes" : "no",
+        "Nodes (live/dead/pruned)": `${stats.live}/${stats.dead}/${stats.pruned}`,
+      };
+      if (meta.lifecycleReason) fields["Reason"] = meta.lifecycleReason;
+      console.log();
+      console.log(`  ${BOLD}Crawl status: "${ctx.crawlManager.activeCrawl.name}"${RESET}`);
+      render.crawlCard(fields);
+      console.log();
+      ctx.logCommand("/crawl status");
+      return;
+    }
+
     default: {
       console.log();
       console.log(`  ${BOLD}Crawl subcommands:${RESET}`);
@@ -256,6 +407,11 @@ export async function handleCrawl(ctx: ReplContext, arg: string, parts: string[]
       console.log(`  ${CYAN}/crawl rename <name>${RESET}  Rename the active crawl`);
       console.log(`  ${CYAN}/crawl end${RESET}            Save and end the active crawl`);
       console.log(`  ${CYAN}/crawl info${RESET}           Show active crawl metadata`);
+      console.log(`  ${CYAN}/crawl done [reason]${RESET}  Mark crawl as done`);
+      console.log(`  ${CYAN}/crawl pin${RESET}            Toggle pinned flag`);
+      console.log(`  ${CYAN}/crawl status${RESET}         Show lifecycle and classification`);
+      console.log(`  ${CYAN}/crawl prune${RESET}          Remove dead-end branches`);
+      console.log(`  ${CYAN}/crawl merge${RESET}          Merge another crawl into active`);
       console.log();
       return;
     }
